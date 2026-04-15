@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Suivi & Projection d'Effectif</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Suivi & Projection d'Effectif</h1>
+    <nav class="tabs">
+      <button class="tab active" data-tab="squad">Effectif actuel</button>
+      <button class="tab" data-tab="scouting">Recrutement</button>
+      <button class="tab" data-tab="projection">Projection N+1</button>
+      <button class="tab" data-tab="data">Données</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ============ EFFECTIF ACTUEL ============ -->
+    <section id="squad" class="panel active">
+      <div class="panel-header">
+        <h2>Effectif actuel</h2>
+        <button class="btn primary" id="add-player-btn">+ Ajouter un joueur</button>
+      </div>
+
+      <div class="filters">
+        <input type="text" id="squad-search" placeholder="Rechercher un joueur..." />
+        <select id="squad-filter-pos">
+          <option value="">Tous les postes</option>
+          <option>Gardien</option>
+          <option>Défenseur central</option>
+          <option>Latéral</option>
+          <option>Milieu défensif</option>
+          <option>Milieu central</option>
+          <option>Milieu offensif</option>
+          <option>Ailier</option>
+          <option>Attaquant</option>
+        </select>
+      </div>
+
+      <div id="squad-list" class="card-grid"></div>
+    </section>
+
+    <!-- ============ RECRUTEMENT ============ -->
+    <section id="scouting" class="panel">
+      <div class="panel-header">
+        <h2>Joueurs suivis (recrutement)</h2>
+        <button class="btn primary" id="add-scout-btn">+ Ajouter un joueur suivi</button>
+      </div>
+
+      <div class="filters">
+        <input type="text" id="scout-search" placeholder="Rechercher..." />
+        <select id="scout-filter-pos">
+          <option value="">Tous les postes</option>
+          <option>Gardien</option>
+          <option>Défenseur central</option>
+          <option>Latéral</option>
+          <option>Milieu défensif</option>
+          <option>Milieu central</option>
+          <option>Milieu offensif</option>
+          <option>Ailier</option>
+          <option>Attaquant</option>
+        </select>
+        <select id="scout-filter-status">
+          <option value="">Tous les statuts</option>
+          <option>À observer</option>
+          <option>Intéressant</option>
+          <option>Priorité</option>
+          <option>Écarté</option>
+        </select>
+      </div>
+
+      <div id="scout-list" class="card-grid"></div>
+    </section>
+
+    <!-- ============ PROJECTION N+1 ============ -->
+    <section id="projection" class="panel">
+      <div class="panel-header">
+        <h2>Projection effectif N+1</h2>
+        <div class="proj-actions">
+          <button class="btn" id="proj-pick-current">+ Depuis l'effectif actuel</button>
+          <button class="btn" id="proj-pick-scout">+ Depuis le recrutement</button>
+        </div>
+      </div>
+
+      <div class="projection-summary" id="projection-summary"></div>
+
+      <div class="projection-groups">
+        <div class="proj-col">
+          <h3>Conservés</h3>
+          <div id="proj-kept" class="proj-list"></div>
+        </div>
+        <div class="proj-col">
+          <h3>Cibles recrutement</h3>
+          <div id="proj-targets" class="proj-list"></div>
+        </div>
+        <div class="proj-col">
+          <h3>Départs</h3>
+          <div id="proj-out" class="proj-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ DONNEES ============ -->
+    <section id="data" class="panel">
+      <div class="panel-header">
+        <h2>Sauvegarde & restauration des données</h2>
+      </div>
+      <p class="hint">
+        Les données sont stockées localement dans votre navigateur.
+        Pensez à exporter régulièrement pour ne rien perdre.
+      </p>
+      <div class="data-actions">
+        <button class="btn primary" id="export-btn">Exporter (JSON)</button>
+        <label class="btn">
+          Importer
+          <input type="file" id="import-file" accept="application/json" hidden />
+        </label>
+        <button class="btn danger" id="reset-btn">Tout effacer</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ MODALES ============ -->
+  <div id="modal-root"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
