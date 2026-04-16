@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "import-match": "node scripts/import-footclubs.js",
-    "import-match:latest": "node scripts/import-footclubs.js --latest"
+    "import-match:latest": "node scripts/import-footclubs.js --latest",
+    "scrape-flashscore": "node scripts/scrape-flashscore.js"
   },
   "dependencies": {
     "puppeteer": "^23.0.0"

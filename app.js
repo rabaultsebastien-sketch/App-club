@@ -1682,6 +1682,127 @@ function closeModal() {
 }
 
 /* =========================================================
+   IMPORT FLASHSCORE (JSON généré par scrape-flashscore.js)
+   ========================================================= */
+document.getElementById('import-flashscore')?.addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const matches = Array.isArray(data) ? data : [data];
+    openFlashscorePreview(matches);
+  } catch (err) {
+    alert('Erreur lecture FlashScore JSON : ' + err.message);
+  }
+  e.target.value = '';
+});
+
+function openFlashscorePreview(matches) {
+  const teamKw = ['orl\u00e9ans', 'orleans'];
+  const isOrleans = (name) => teamKw.some(k => (name||'').toLowerCase().includes(k));
+
+  const matchRows = matches.map((m, idx) => {
+    const isHome = isOrleans(m.home);
+    const opponent = isHome ? m.away : m.home;
+    const venue = isHome ? 'Domicile' : 'Ext\u00e9rieur';
+    const ourPlayers = (m.players || []).filter(p => {
+      if (p.team === 'home' && isHome) return true;
+      if (p.team === 'away' && !isHome) return true;
+      return p.team === 'unknown';
+    });
+
+    return {
+      idx, date: m.date || '', opponent, venue,
+      score: `${m.scoreHome || '?'} - ${m.scoreAway || '?'}`,
+      players: ourPlayers
+    };
+  });
+
+  const rowsHtml = matchRows.map(m => `
+    <tr>
+      <td><input type="checkbox" data-midx="${m.idx}" checked /></td>
+      <td>${escapeHtml(m.date)}</td>
+      <td>${escapeHtml(m.opponent)}</td>
+      <td>${escapeHtml(m.venue)}</td>
+      <td class="num">${escapeHtml(m.score)}</td>
+      <td class="num">${m.players.length}</td>
+    </tr>
+  `).join('');
+
+  openModal(`
+    <h3>\u26A1 Import FlashScore</h3>
+    <div class="card-sub">${matches.length} match(s) trouv\u00e9(s). Cochez ceux \u00e0 importer.</div>
+    <div style="max-height:50vh; overflow:auto; margin-top:12px;">
+      <table class="matches-table">
+        <thead><tr><th></th><th>Date</th><th>Adversaire</th><th>Lieu</th><th>Score</th><th>Joueurs</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Annuler</button>
+      <button type="button" class="btn primary" id="fs-import-confirm">Importer la s\u00e9lection</button>
+    </div>
+  `);
+
+  document.getElementById('fs-import-confirm').addEventListener('click', () => {
+    const checks = document.querySelectorAll('[data-midx]');
+    let added = 0;
+
+    checks.forEach(cb => {
+      if (!cb.checked) return;
+      const m = matchRows[Number(cb.dataset.midx)];
+      if (!m) return;
+
+      for (const fp of m.players) {
+        const nameParts = (fp.name || '').trim().split(/\s+/);
+        const lastName = nameParts.filter(w => w === w.toUpperCase() && w.length > 1).join(' ') || nameParts.slice(-1).join('');
+        const firstName = nameParts.filter(w => w !== w.toUpperCase() || w.length <= 1).join(' ') || nameParts.slice(0, -1).join(' ');
+
+        let squadP = state.squad.find(p =>
+          p.lastName.toUpperCase() === lastName.toUpperCase() ||
+          (p.number && p.number === fp.number)
+        );
+
+        if (!squadP) {
+          squadP = state.squad.find(p => {
+            const fullSq = (p.firstName + ' ' + p.lastName).toLowerCase();
+            const fullFs = fp.name.toLowerCase();
+            return fullSq.includes(fullFs) || fullFs.includes(p.lastName.toLowerCase());
+          });
+        }
+
+        if (!squadP) continue;
+
+        const alreadyImported = (squadP.matches || []).some(em =>
+          em.date === m.date && em.opponent === m.opponent
+        );
+        if (alreadyImported) continue;
+
+        squadP.matches = squadP.matches || [];
+        squadP.matches.push({
+          id: uid(),
+          date: m.date,
+          opponent: m.opponent,
+          venue: m.venue,
+          starter: fp.starter !== false,
+          minutes: Number(fp.minutes) || 0,
+          goals: Number(fp.goals) || 0,
+          assists: Number(fp.assists) || 0,
+          yellowCards: Number(fp.yellowCards) || 0,
+          redCards: Number(fp.redCards) || 0,
+          notes: 'Import FlashScore'
+        });
+        added++;
+      }
+    });
+
+    saveState(); closeModal(); renderSquad();
+    alert(`\u2705 ${added} performance(s) ajout\u00e9e(s) depuis FlashScore.`);
+  });
+}
+
+/* =========================================================
    Utils
    ========================================================= */
 function escapeHtml(s) {
