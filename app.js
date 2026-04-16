@@ -33,13 +33,15 @@ function uid() {
 /* ---------- Helpers ---------- */
 function totals(matches = []) {
   return matches.reduce((acc, m) => {
-    acc.matches += 1;
-    acc.minutes += Number(m.minutes) || 0;
+    const mins = Number(m.minutes) || 0;
+    acc.minutes += mins;
     acc.goals += Number(m.goals) || 0;
     acc.assists += Number(m.assists) || 0;
     acc.yellowCards += Number(m.yellowCards) || 0;
     acc.redCards += Number(m.redCards) || 0;
-    if (m.starter) acc.starts += 1; else acc.subs += 1;
+    // Un titulaire compte toujours ; un remplaçant compte uniquement s'il est entré en jeu (min > 0).
+    if (m.starter) { acc.starts += 1; acc.matches += 1; }
+    else if (mins > 0) { acc.subs += 1; acc.matches += 1; }
     return acc;
   }, { matches: 0, minutes: 0, goals: 0, assists: 0, yellowCards: 0, redCards: 0, starts: 0, subs: 0 });
 }
