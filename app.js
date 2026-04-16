@@ -954,65 +954,69 @@ function parseGoalLine(line) {
    Met à jour les minutes des joueurs impactés.
 */
 function parseRemplacementRows(rows, fromIdx, toIdx, players) {
-  // Index par "team#number" (prioritaire) et par numéro seul (fallback sans colonnes).
-  const byTeamNum = {};
-  const byNum = {};
-  players.forEach(p => {
-    if (p.number) {
-      if (p.team) byTeamNum[p.team + '#' + p.number] = p;
-      if (!byNum[p.number]) byNum[p.number] = p; // conserve le premier trouvé
-    }
-  });
+  // Les événements de substitution utilisent les licences comme ancres.
+  // Sur chaque ligne (par colonne), on trouve des couples de licences + une minute :
+  //   licence_sortant  (...NOM Prénom sortant...)  licence_entrant  (...NOM Prénom entrant...)  minute'
+  // Les noms peuvent wrapper sur 2-3 lignes visuelles ; on concatène donc toutes les
+  // lignes de la section par colonne avant de parser.
+  const byLicence = {};
+  players.forEach(p => { if (p.licence) byLicence[p.licence] = p; });
 
   const inMin = new Map();
   const outMin = new Map();
 
-  // Tokenise un texte : retourne liste de {type:'ref'|'min', number?, minute?, pos}.
-  function remTokenize(text) {
-    if (!text) return [];
-    const tokens = [];
-    // Ref : "NN - NOM" (mots supplémentaires doivent avoir ≥2 lettres majuscules)
-    const refRe = /(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-']*(?:\s+[A-ZÀ-Ö][A-ZÀ-Ö\-']+)*)/g;
-    const minRe = /(\d{1,3})'\s*\+\s*\d+'/g;
-    let m;
-    while ((m = refRe.exec(text)) !== null)
-      tokens.push({ type: 'ref', number: m[1], pos: m.index });
-    while ((m = minRe.exec(text)) !== null)
-      tokens.push({ type: 'min', minute: Number(m[1]), pos: m.index });
-    return tokens.sort((a, b) => a.pos - b.pos);
-  }
+  // Concatène le contenu de toutes les lignes pour un extracteur donné (left/right/text).
+  const mergeColumn = (pick) => {
+    const parts = [];
+    for (let i = fromIdx; i < toIdx; i++) {
+      const row = rows[i];
+      if (row) {
+        const v = pick(row);
+        if (v) parts.push(v);
+      }
+    }
+    return parts.join(' ');
+  };
 
-  // Apparie paires (out, in) → minute dans un flux de tokens, pour une équipe donnée.
-  function remApply(tokens, team) {
-    const lookup = n => team ? (byTeamNum[team + '#' + n] || null) : (byNum[n] || null);
+  // Extrait licences et minutes dans l'ordre de position, apparie chaque minute avec les
+  // 2 licences qui la précèdent (out=1re, in=2e).
+  const processColumn = (colText) => {
+    if (!colText) return;
+    const tokens = [];
+    const licRe = /\b(\d{9,10})\b/g;
+    const minRe = /\b(\d{1,3})'(?:\s*\+\s*\d+')?/g;
+    let m;
+    while ((m = licRe.exec(colText)) !== null)
+      tokens.push({ type: 'lic', licence: m[1], pos: m.index });
+    while ((m = minRe.exec(colText)) !== null)
+      tokens.push({ type: 'min', minute: Number(m[1]), pos: m.index });
+    tokens.sort((a, b) => a.pos - b.pos);
+
     let pending = [];
     for (const tok of tokens) {
-      if (tok.type === 'ref') {
+      if (tok.type === 'lic') {
         pending.push(tok);
       } else {
         while (pending.length >= 2) {
-          const outRef = pending.shift();
-          const inRef  = pending.shift();
-          const outP = lookup(outRef.number);
-          const inP  = lookup(inRef.number);
+          const outLic = pending.shift();
+          const inLic  = pending.shift();
+          const outP = byLicence[outLic.licence];
+          const inP  = byLicence[inLic.licence];
           if (outP) outMin.set(outP, tok.minute);
           if (inP)  inMin.set(inP,  tok.minute);
         }
         pending = [];
       }
     }
-  }
+  };
 
-  for (let i = fromIdx; i < toIdx; i++) {
-    const row = rows[i];
-    if (!row) continue;
-    if (row.leftText || row.rightText) {
-      remApply(remTokenize(row.leftText), 'home');
-      remApply(remTokenize(row.rightText), 'away');
-    } else {
-      // Pas de colonnes : on déduit l'équipe en cherchant le joueur dans les deux équipes
-      remApply(remTokenize(row.text), null);
-    }
+  const leftMerged  = mergeColumn(r => r.leftText);
+  const rightMerged = mergeColumn(r => r.rightText);
+  if (leftMerged || rightMerged) {
+    processColumn(leftMerged);
+    processColumn(rightMerged);
+  } else {
+    processColumn(mergeColumn(r => r.text));
   }
 
   // Applique : titulaire sorti → minutes = outMin ; sub entré → minutes = 90 − inMin.
