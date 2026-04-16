@@ -1360,39 +1360,73 @@ function excelDateToIso(v) {
 }
 
 function parseSquadExcelGrid(grid) {
-  if (!grid || grid.length < 9) throw new Error('Feuille trop courte : au moins 9 lignes attendues.');
+  if (!grid || grid.length < 5) throw new Error('Feuille trop courte.');
 
-  const datesRow = grid[0] || [];
+  // --- Détection dynamique de la ligne d'en-têtes joueurs ---
+  // On cherche la ligne qui contient "N°" (ou un entier) en col 0 et "Prénom"/"Nom" en col 1-2
+  let headerRowIdx = -1;
+  for (let r = 0; r < Math.min(grid.length, 15); r++) {
+    const row = grid[r] || [];
+    const v0 = String(row[0] || '').trim();
+    const v1 = String(row[1] || '').trim().toLowerCase();
+    if ((v0 === 'N°' || v0 === 'No' || v0 === '#') && (v1.startsWith('pr') || v1 === 'firstname')) {
+      headerRowIdx = r; break;
+    }
+  }
+  if (headerRowIdx === -1) headerRowIdx = 7; // fallback
+
+  // Lignes de métadonnées matchs (au-dessus de la ligne d'en-têtes)
+  const datesRow     = grid[0] || [];
   const opponentsRow = grid[1] || [];
-  const venuesRow = grid[2] || [];
-  const resultsRow = grid[3] || [];
-  const headerRow = grid[7] || [];
+  const venuesRow    = grid[2] || [];
+  const resultsRow   = grid[3] || [];
+  const headerRow    = grid[headerRowIdx] || [];
 
-  // Repère l'index de la 1re colonne "Poste" qui suit "Pied" (après les 6 colonnes d'info joueur)
+  // --- Détection de la première colonne de match ---
+  // Cherche le 2e "Poste" dans la ligne d'en-têtes (le 1er est la position du joueur)
+  let posCount = 0;
   let firstMatchCol = -1;
-  for (let c = 6; c < headerRow.length; c++) {
-    const v = String(headerRow[c] || '').trim().toLowerCase();
-    if (v === 'poste') { firstMatchCol = c; break; }
+  for (let c = 0; c < headerRow.length; c++) {
+    if (String(headerRow[c] || '').trim().toLowerCase() === 'poste') {
+      posCount++;
+      if (posCount === 2) { firstMatchCol = c; break; }
+    }
   }
   if (firstMatchCol === -1) firstMatchCol = 6;
 
-  // Construit la liste des matchs (bloc de 7 colonnes par match)
-  const matches = [];
-  for (let c = firstMatchCol; c < headerRow.length; c += 7) {
-    const rawDate = datesRow[c];
-    if (!rawDate) continue;
-    matches.push({
-      col: c,
-      date: excelDateToIso(rawDate),
-      opponent: String(opponentsRow[c] || '').trim(),
-      venue: String(venuesRow[c] || '').trim(),
-      result: String(resultsRow[c] || '').trim()
-    });
+  // --- Détection des matchs en scannant la ligne des dates ---
+  // On cherche toutes les valeurs non-vides dans datesRow à partir de firstMatchCol.
+  // La date peut être décalée d'une colonne par rapport à "Poste" (merged cell dans Excel).
+  // On détermine le début du bloc match à partir de l'alignement modulo 7.
+  const allDateCells = [];
+  for (let c = firstMatchCol - 1; c < datesRow.length; c++) {
+    const v = datesRow[c];
+    if (v != null && v !== '') allDateCells.push({ c, v });
   }
 
-  // Parcourt les joueurs à partir de la ligne 9 (index 8)
+  // Pour chaque date trouvée, détermine le début du bloc (modulo 7)
+  const matches = [];
+  const seenCols = new Set();
+  for (const { c, v } of allDateCells) {
+    const isoDate = excelDateToIso(v);
+    if (!isoDate) continue;
+    // Aligne sur le bloc de 7 le plus proche en dessous
+    const offset = (c - firstMatchCol) % 7;
+    const blockStart = offset >= 0 ? c - offset : c - (offset + 7);
+    const col = blockStart < firstMatchCol ? firstMatchCol : blockStart;
+    if (seenCols.has(col)) continue;
+    seenCols.add(col);
+    // Cherche l'adversaire dans la même zone de colonne
+    const opp = String(opponentsRow[c] || opponentsRow[col] || '').trim();
+    const venue = String(venuesRow[c] || venuesRow[col] || '').trim();
+    const result = String(resultsRow[c] || resultsRow[col] || '').trim();
+    matches.push({ col, date: isoDate, opponent: opp, venue, result });
+  }
+  matches.sort((a, b) => a.col - b.col);
+
+  // --- Parsing joueurs (lignes après la ligne d'en-têtes) ---
   const players = [];
-  for (let r = 8; r < grid.length; r++) {
+  for (let r = headerRowIdx + 1; r < grid.length; r++) {
     const row = grid[r] || [];
     const number = row[0];
     const firstName = String(row[1] || '').trim();
@@ -1407,18 +1441,14 @@ function parseSquadExcelGrid(grid) {
       const status = String(row[m.col] || '').trim().toUpperCase();
       if (status !== 'T' && status !== 'R') continue;
       const minutes = Number(row[m.col + 1]) || 0;
-      const goals = Number(row[m.col + 2]) || 0;
+      const goals   = Number(row[m.col + 2]) || 0;
       const assists = Number(row[m.col + 3]) || 0;
       playerMatches.push({
         id: uid(),
-        date: m.date,
-        opponent: m.opponent,
-        venue: m.venue,
-        result: m.result,
+        date: m.date, opponent: m.opponent, venue: m.venue, result: m.result,
         starter: status === 'T',
         minutes, goals, assists,
-        yellowCards: 0,
-        redCards: 0,
+        yellowCards: 0, redCards: 0,
         notes: 'Import Excel'
       });
     }
@@ -1426,11 +1456,14 @@ function parseSquadExcelGrid(grid) {
     players.push({
       id: uid(),
       number: number != null && number !== '' ? String(number) : '',
-      firstName, lastName, position,
-      age, foot, notes: '',
+      firstName, lastName, position, age, foot, notes: '',
       matches: playerMatches
     });
   }
+
+  // Diagnostic console pour debug
+  console.log('[Excel import] headerRowIdx=', headerRowIdx, 'firstMatchCol=', firstMatchCol, 'matches=', matches.length, 'players=', players.length);
+  console.log('[Excel import] Premiers matchs:', matches.slice(0, 3));
 
   return { matches, players };
 }
