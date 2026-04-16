@@ -1342,7 +1342,11 @@ function normalizeExcelPosition(raw) {
 
 function excelDateToIso(v) {
   if (v == null || v === '') return '';
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (v instanceof Date) {
+    // +12h pour éviter le décalage timezone (Excel date à 23:59 UTC → jour précédent)
+    const d = new Date(v.getTime() + 12 * 3600 * 1000);
+    return d.toISOString().slice(0, 10);
+  }
   if (typeof v === 'number') {
     const d = XLSX.SSF.parse_date_code(v);
     if (!d) return '';
@@ -1484,14 +1488,18 @@ function parseSquadExcelGrid(grid, colorMap) {
   // Diagnostic console pour debug
   console.log('[Excel import] headerRowIdx=', headerRowIdx, 'firstMatchCol=', firstMatchCol);
   console.log('[Excel import] matches=', matches.length, 'players=', players.length);
-  console.log('[Excel import] datesRow (idx ' + (headerRowIdx-7) + '):', JSON.stringify(datesRow.slice(0,15)));
-  for (let _r = 0; _r < headerRowIdx; _r++) {
-    const _row = grid[_r] || [];
-    const _nonEmpty = _row.slice(0,20).filter(v => v !== '' && v != null);
-    if (_nonEmpty.length > 0) console.log('[Excel import] row[' + _r + ']:', JSON.stringify(_row.slice(0,15)));
+  // Log cartons du 1er joueur ayant des cartons
+  const pWithCards = players.find(p => p.matches.some(m => m.yellowCards > 0 || m.redCards > 0));
+  if (pWithCards) {
+    console.log('[Excel import] Joueur avec cartons:', pWithCards.firstName, pWithCards.lastName,
+      pWithCards.matches.filter(m => m.yellowCards || m.redCards).map(m => ({ date: m.date, y: m.yellowCards, r: m.redCards })));
+  } else {
+    console.log('[Excel import] Aucun carton trouvé. Colonnes cartons (1er joueur, 1er match):',
+      'col+4=', JSON.stringify(grid[headerRowIdx+1]?.[matches[0]?.col + 4]),
+      'col+5=', JSON.stringify(grid[headerRowIdx+1]?.[matches[0]?.col + 5]),
+      'headerRow col+4=', JSON.stringify(headerRow[matches[0]?.col + 4]),
+      'headerRow col+5=', JSON.stringify(headerRow[matches[0]?.col + 5]));
   }
-  console.log('[Excel import] headerRow:', JSON.stringify((grid[headerRowIdx]||[]).slice(0,9)));
-  console.log('[Excel import] 1er joueur:', JSON.stringify((grid[headerRowIdx+1]||[]).slice(0,9)));
 
   return { matches, players };
 }
