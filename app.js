@@ -643,48 +643,223 @@ document.getElementById('import-fdmi-pdf').addEventListener('change', async e =>
   e.target.value = '';
 });
 
-/* Tente d'extraire la FDMI depuis les lignes de texte du PDF.
-   Les FDMI FFF suivent un format récurrent qu'on va affiner après
-   avoir vu le texte réel. Pour la v1 on retourne null et on affiche
-   le texte brut pour copie/inspection. */
+/* Parseur FDMI FFF — format réel observé.
+   Structure clé :
+     - COMPOSITION : titulaires (deux colonnes, séparées par le n° de licence)
+     - REMPLAÇANTS : suppléants, avec marqueur "N'a pas participé"
+     - REMPLACEMENT : événements de substitution (minute d'entrée/sortie)
+     - BUTEURS : buts + passeurs (= passes décisives)
+     - DISCIPLINE : cartons
+   Chaque ligne texte contient à la fois l'info domicile ET extérieur,
+   séparées par les numéros de licence (9 ou 10 chiffres).
+*/
 function tryParseFdmiPdf(lines) {
-  const joined = lines.join('\n');
+  const sections = findFdmiSections(lines);
+  if (!sections.COMPOSITION) return null;
 
-  // Cherche une date au format JJ/MM/AAAA ou AAAA-MM-JJ
-  const dateMatch = joined.match(/\b(\d{2})\/(\d{2})\/(\d{4})\b/);
+  const text = lines.join('\n');
+
+  // Méta du match
+  const dateMatch = text.match(/Date\s*:\s*(\d{2})\/(\d{2})\/(\d{4})\s+(\d{1,2})h(\d{2})/);
   const date = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : '';
+  const competitionMatch = text.match(/Compétition\s*:\s*(.+?)(?:\s+Arrêté|\n|$)/);
+  const competition = competitionMatch ? competitionMatch[1].trim() : '';
 
-  // Patterns possibles pour une ligne joueur :
-  //  "9 EL KHOUMISTI Fahd 90"           (numéro NOM Prénom minutes)
-  //  "9 Fahd EL KHOUMISTI"               (numéro Prénom NOM)
-  //  "9 EL KHOUMISTI F."                 (initiale)
-  const playerLineRe = /^(\d{1,2})\s+([A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ\s'\-]+?)\s+([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+)*)\s*(\d{1,3})?$/;
-  const playerLineAltRe = /^(\d{1,2})\s+([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+)*)\s+([A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ\s'\-]+?)\s*(\d{1,3})?$/;
+  // Noms des équipes (ligne juste après "Equipe Recevante Equipe Visiteuse")
+  let homeTeamName = '', awayTeamName = '';
+  const teamLineIdx = sections.COMPOSITION + 2;
+  if (lines[teamLineIdx]) {
+    const teamLine = lines[teamLineIdx];
+    // Exemple: "Orleans Us 45 1 - 504891 Concarneau Us 1 - 500308"
+    const parts = teamLine.split(/\s+-\s+\d{5,7}/);
+    if (parts.length >= 2) {
+      homeTeamName = parts[0].replace(/\s+\d+$/, '').trim(); // retire le score
+      awayTeamName = parts[1].replace(/\s+\d+$/, '').trim();
+    }
+  }
 
+  // Titulaires
   const players = [];
-  lines.forEach(line => {
-    const m = line.match(playerLineRe) || line.match(playerLineAltRe);
-    if (!m) return;
-    const [, number, a, b, min] = m;
-    // Détermine qui est le nom (tout majuscules) et qui est le prénom
-    const aIsUpper = a === a.toUpperCase();
-    const lastName = aIsUpper ? a.trim() : b.trim();
-    const firstName = aIsUpper ? b.trim() : a.trim();
-    if (players.some(p => p.number === number)) return; // dédup
-    players.push({
-      number,
-      firstName,
-      lastName,
-      starter: null,
-      minutes: min ? Number(min) : null,
-      goals: 0,
-      assists: 0
-    });
+  const compStart = sections.COMPOSITION + 3;
+  const compEnd = sections.REMPLACANTS || lines.length;
+  for (let i = compStart; i < compEnd; i++) {
+    const parsed = parseDoubleColumnLine(lines[i]);
+    if (parsed) {
+      if (parsed.home) players.push({ ...parsed.home, starter: true, team: 'home', didNotPlay: false });
+      if (parsed.away) players.push({ ...parsed.away, starter: true, team: 'away', didNotPlay: false });
+    }
+  }
+
+  // Remplaçants
+  if (sections.REMPLACANTS != null) {
+    const subEnd = sections.BANC || sections.REMPLACEMENT || lines.length;
+    for (let i = sections.REMPLACANTS + 1; i < subEnd; i++) {
+      const parsed = parseDoubleColumnLine(lines[i], { detectNotPlayed: true });
+      if (parsed) {
+        if (parsed.home) players.push({ ...parsed.home, starter: false, team: 'home' });
+        if (parsed.away) players.push({ ...parsed.away, starter: false, team: 'away' });
+      }
+    }
+  }
+
+  // Buts + passes décisives
+  if (sections.BUTEURS != null) {
+    const butEnd = findNextSection(lines, sections.BUTEURS + 1);
+    for (let i = sections.BUTEURS + 2; i < butEnd; i++) {
+      const g = parseGoalLine(lines[i]);
+      if (!g) continue;
+      const scorer = players.find(p =>
+        normalizeName(p.lastName).includes(normalizeName(g.scorerLast)) &&
+        String(p.number) === String(g.scorerNumber)
+      );
+      if (scorer) scorer.goals = (scorer.goals || 0) + 1;
+      if (g.assistNumber) {
+        const assister = players.find(p =>
+          normalizeName(p.lastName).includes(normalizeName(g.assistLast)) &&
+          String(p.number) === String(g.assistNumber)
+        );
+        if (assister) assister.assists = (assister.assists || 0) + 1;
+      }
+    }
+  }
+
+  // Minutes : défauts (éditables dans l'aperçu)
+  players.forEach(p => {
+    if (p.didNotPlay) {
+      p.minutes = 0;
+    } else if (p.starter) {
+      p.minutes = 90;
+    } else {
+      p.minutes = 0; // sub qui a joué : l'utilisateur ajuste
+    }
+    p.goals = p.goals || 0;
+    p.assists = p.assists || 0;
   });
 
-  if (players.length < 3) return null; // pas assez pour considérer que c'est fiable
+  if (players.length < 5) return null;
 
-  return { match: { date, opponent: '', competition: '' }, players };
+  return {
+    match: { date, opponent: '', competition, homeTeamName, awayTeamName },
+    players
+  };
+}
+
+/* Localise les en-têtes de sections dans les lignes du PDF. */
+function findFdmiSections(lines) {
+  const result = {};
+  const headers = {
+    COMPOSITION: /^COMPOSITION$/,
+    REMPLACANTS: /^REMPLA[ÇC]ANTS$/,
+    BANC: /^BANC$/,
+    REMPLACEMENT: /^REMPLACEMENT$/,
+    DISCIPLINE: /^DISCIPLINE$/,
+    BLESSURES: /^BLESSURES$/,
+    BUTEURS: /^BUTEURS$/
+  };
+  lines.forEach((l, i) => {
+    for (const [k, re] of Object.entries(headers)) {
+      if (re.test(l.trim())) result[k] = i;
+    }
+  });
+  return result;
+}
+
+function findNextSection(lines, from) {
+  for (let i = from; i < lines.length; i++) {
+    if (/^[A-ZÀ-Ö'\s]{4,}$/.test(lines[i].trim()) && lines[i].trim().length < 30) return i;
+  }
+  return lines.length;
+}
+
+/* Parse une ligne à deux colonnes (domicile | extérieur) délimitées
+   par des numéros de licence (9-10 chiffres). */
+function parseDoubleColumnLine(line, opts = {}) {
+  if (!line) return null;
+  const licenceRe = /\b\d{9,10}\b/g;
+  const lic = [];
+  let m;
+  while ((m = licenceRe.exec(line)) !== null) {
+    lic.push({ value: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  if (lic.length < 1) return null;
+
+  const res = {};
+
+  // Côté domicile : du début jusqu'à la 1re licence
+  const homeText = line.slice(0, lic[0].start).trim();
+  const homeAfter = line.slice(lic[0].end, lic[1] ? lic[1].start : line.length).trim();
+  const home = parsePlayerTokens(homeText);
+  if (home) {
+    home.licence = lic[0].value;
+    if (opts.detectNotPlayed && /N'a pas particip/i.test(homeAfter)) home.didNotPlay = true;
+    res.home = home;
+  }
+
+  // Côté extérieur
+  if (lic.length >= 2) {
+    let awayStart = lic[0].end;
+    // S'il y a "N'a pas participé" entre les deux, on le consomme
+    const between = line.slice(lic[0].end, lic[1].start);
+    const npMatch = between.match(/N'a pas particip[eé]/i);
+    if (npMatch) awayStart = lic[0].end + npMatch.index + npMatch[0].length;
+    const awayText = line.slice(awayStart, lic[1].start).trim();
+    const awayAfter = line.slice(lic[1].end).trim();
+    const away = parsePlayerTokens(awayText);
+    if (away) {
+      away.licence = lic[1].value;
+      if (opts.detectNotPlayed && /N'a pas particip/i.test(awayAfter)) away.didNotPlay = true;
+      res.away = away;
+    }
+  }
+
+  return Object.keys(res).length > 0 ? res : null;
+}
+
+/* Extrait (numero, nom, prénom) d'un bloc texte. Le nom est la séquence
+   de mots en MAJUSCULES au début ; le prénom suit en casse mixte. */
+function parsePlayerTokens(text) {
+  if (!text) return null;
+  text = text.replace(/\(Capitaine\)/gi, '').replace(/\s+/g, ' ').trim();
+  const m = text.match(/^(\d{1,2})\s+(.+)$/);
+  if (!m) return null;
+  const number = m[1];
+  const words = m[2].split(/\s+/);
+  const last = [], first = [];
+  let inLast = true;
+  for (const w of words) {
+    if (inLast && /^[A-ZÀ-Ö][A-ZÀ-Ö\-']*$/.test(w)) last.push(w);
+    else { inLast = false; first.push(w); }
+  }
+  if (last.length === 0) return null;
+  return {
+    number,
+    lastName: last.join(' '),
+    firstName: first.join(' '),
+    didNotPlay: false
+  };
+}
+
+/* Parse une ligne de but :
+   "Orleans Us 45 1606020252 9 - EL KHOUMISTI Fahd Du pied Passe 22 - MOREL Jordan 62' + 0'"
+   Retour : { scorerNumber, scorerLast, assistNumber?, assistLast? }
+*/
+function parseGoalLine(line) {
+  if (!line) return null;
+  // Un but mentionne toujours une minute
+  if (!/\d{1,3}'\s*\+\s*\d+'/.test(line)) return null;
+  const re = /(\d{9,10})\s+(\d{1,2})\s+-\s+([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]*?)\s+([A-ZÀ-Ö][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-Ö][a-zà-öø-ÿ]+)*)\s+(Du pied|De la tête|Du genou|Autre|Sur\s+.+?|Penalty)\s+(Aucune|Passe|[A-ZÀ-Ö].*?)(?:\s+(\d{1,2})\s+-\s+([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]*?)\s+([A-ZÀ-Ö][a-zà-öø-ÿ]+))?\s+(\d{1,3})'\s*\+\s*\d+'/;
+  const m = line.match(re);
+  if (!m) return null;
+  return {
+    scorerNumber: m[2],
+    scorerLast: m[3].trim(),
+    scorerFirst: m[4].trim(),
+    action: m[6].trim(),
+    assistNumber: m[7] || null,
+    assistLast: m[8] ? m[8].trim() : null,
+    assistFirst: m[9] ? m[9].trim() : null,
+    minute: Number(m[10])
+  };
 }
 
 function openPdfFdmiModal(rawLines, parsed) {
@@ -765,9 +940,25 @@ function matchSquadPlayer(fdmiPlayer) {
 
 function openFdmiPreviewModal(fdmi) {
   const matchInfo = fdmi.match || {};
-  const rows = fdmi.players.map((fp, i) => {
+
+  // Auto-détection de votre équipe : celle avec le plus de correspondances
+  const homeMatches = fdmi.players.filter(p => p.team === 'home' && matchSquadPlayer(p)).length;
+  const awayMatches = fdmi.players.filter(p => p.team === 'away' && matchSquadPlayer(p)).length;
+  const mySide = homeMatches >= awayMatches ? 'home' : 'away';
+  const myTeamName = mySide === 'home' ? matchInfo.homeTeamName : matchInfo.awayTeamName;
+  const opponentName = mySide === 'home' ? matchInfo.awayTeamName : matchInfo.homeTeamName;
+
+  // On ne garde que les joueurs de VOTRE équipe (si team est défini)
+  const relevantPlayers = fdmi.players.filter(p => !p.team || p.team === mySide);
+
+  const rows = relevantPlayers.map((fp, i) => {
     const squadP = matchSquadPlayer(fp);
-    return { fp, squadP, index: i, include: !!squadP && (fp.minutes > 0 || fp.starter) };
+    return {
+      fp,
+      squadP,
+      index: i,
+      include: !!squadP && !fp.didNotPlay && (fp.starter || fp.minutes > 0 || fp.goals > 0 || fp.assists > 0)
+    };
   });
 
   const matched = rows.filter(r => r.squadP).length;
@@ -777,16 +968,17 @@ function openFdmiPreviewModal(fdmi) {
     <h3>Aperçu FDMI</h3>
     <div class="card-sub" style="margin-bottom:10px;">
       ${matchInfo.date ? '📅 ' + escapeHtml(matchInfo.date) : ''}
-      ${matchInfo.opponent ? ' · vs ' + escapeHtml(matchInfo.opponent) : ''}
+      ${myTeamName ? ' · ' + escapeHtml(myTeamName) : ''}
+      ${opponentName ? ' vs ' + escapeHtml(opponentName) : ''}
       ${matchInfo.competition ? ' · ' + escapeHtml(matchInfo.competition) : ''}
     </div>
     <div class="hint" style="margin-bottom:10px;">
-      ${matched} / ${rows.length} joueurs appariés avec votre effectif.
+      ${matched} / ${rows.length} joueurs de votre équipe appariés avec l'effectif.
       ${unmatched.length > 0 ? ` <span style="color:var(--warning)">${unmatched.length} non reconnu(s).</span>` : ''}
     </div>
     <div class="form-row" style="margin-bottom:10px;">
       <label>Date du match<input type="date" id="fdmi-date" value="${escapeAttr(matchInfo.date || new Date().toISOString().slice(0,10))}" /></label>
-      <label>Adversaire<input id="fdmi-opponent" value="${escapeAttr(matchInfo.opponent || '')}" /></label>
+      <label>Adversaire<input id="fdmi-opponent" value="${escapeAttr(opponentName || matchInfo.opponent || '')}" /></label>
     </div>
     <table class="matches-table" style="margin-top:10px;">
       <thead>
@@ -797,17 +989,19 @@ function openFdmiPreviewModal(fdmi) {
           <th class="num">T/R</th>
           <th class="num">Min</th>
           <th class="num">B</th>
+          <th class="num">PD</th>
         </tr>
       </thead>
       <tbody>
         ${rows.map(r => `
           <tr style="${r.squadP ? '' : 'opacity:0.5;'}">
             <td><input type="checkbox" data-i="${r.index}" ${r.include ? 'checked' : ''} ${r.squadP ? '' : 'disabled'}></td>
-            <td>${r.fp.number ? '#' + escapeHtml(r.fp.number) + ' ' : ''}${escapeHtml(r.fp.firstName)} ${escapeHtml(r.fp.lastName)}</td>
+            <td>${r.fp.number ? '#' + escapeHtml(r.fp.number) + ' ' : ''}${escapeHtml(r.fp.firstName)} ${escapeHtml(r.fp.lastName)}${r.fp.didNotPlay ? ' <em style="color:var(--text-dim);">(non entré)</em>' : ''}</td>
             <td>${r.squadP ? escapeHtml(r.squadP.firstName + ' ' + r.squadP.lastName) : '<em>non trouvé</em>'}</td>
             <td class="num">${r.fp.starter ? 'T' : 'R'}</td>
-            <td class="num">${r.fp.minutes || 0}'</td>
+            <td class="num"><input type="number" data-min="${r.index}" value="${r.fp.minutes || 0}" min="0" max="120" style="width:50px; background:var(--bg-card); border:1px solid var(--border); color:var(--text); padding:2px 4px; border-radius:4px;"></td>
             <td class="num">${r.fp.goals || 0}</td>
+            <td class="num">${r.fp.assists || 0}</td>
           </tr>
         `).join('')}
       </tbody>
@@ -825,6 +1019,11 @@ function openFdmiPreviewModal(fdmi) {
       [...document.querySelectorAll('input[type="checkbox"][data-i]:checked')]
         .map(cb => Number(cb.dataset.i))
     );
+    // Récupère les minutes éditées
+    const editedMinutes = {};
+    document.querySelectorAll('input[type="number"][data-min]').forEach(inp => {
+      editedMinutes[Number(inp.dataset.min)] = Number(inp.value) || 0;
+    });
     let added = 0;
     rows.forEach(r => {
       if (!included.has(r.index) || !r.squadP) return;
@@ -834,7 +1033,7 @@ function openFdmiPreviewModal(fdmi) {
         date,
         opponent,
         starter: !!r.fp.starter,
-        minutes: Number(r.fp.minutes) || 0,
+        minutes: editedMinutes[r.index] != null ? editedMinutes[r.index] : (Number(r.fp.minutes) || 0),
         goals: Number(r.fp.goals) || 0,
         assists: Number(r.fp.assists) || 0,
         notes: 'Import FDMI'
