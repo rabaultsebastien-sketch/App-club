@@ -639,7 +639,8 @@ document.getElementById('import-fdmi-pdf').addEventListener('change', async e =>
       const viewport = page.getViewport({ scale: 1 });
       const midX = viewport.width / 2;
       const content = await page.getTextContent();
-      // Groupe les items par ligne (même coordonnée Y, à 3 pixels près)
+
+      // Groupe les items texte par ligne (même Y, bucket 3px)
       const buckets = {};
       content.items.forEach(it => {
         const y = Math.round(it.transform[5]);
@@ -647,13 +648,46 @@ document.getElementById('import-fdmi-pdf').addEventListener('change', async e =>
         if (!buckets[key]) buckets[key] = [];
         buckets[key].push({ x: it.transform[4], text: it.str });
       });
+
+      // Détecte les rectangles colorés (cartons jaune/rouge) via les opérateurs PDF
+      const cardRects = [];
+      try {
+        const opList = await page.getOperatorList();
+        const OPS = pdfjsLib.OPS;
+        let curR = 0, curG = 0, curB = 0;
+        for (let j = 0; j < opList.fnArray.length; j++) {
+          const fn = opList.fnArray[j];
+          const args = opList.argsArray[j];
+          if (fn === OPS.setFillRGBColor) {
+            [curR, curG, curB] = args;
+          } else if (fn === OPS.setFillGray) {
+            curR = curG = curB = args[0];
+          } else if (fn === OPS.rectangle) {
+            const [rx, ry, rw, rh] = args;
+            const w = Math.abs(rw), h = Math.abs(rh);
+            // Petit rectangle (carton ≈ 8-30 unités PDF)
+            if (w >= 4 && w <= 40 && h >= 4 && h <= 35) {
+              const isYellow = curR > 0.7 && curG > 0.5 && curB < 0.3;
+              const isRed    = curR > 0.6 && curG < 0.3 && curB < 0.3;
+              if (isYellow || isRed) {
+                cardRects.push({ y: Math.round(ry), isYellow, isRed });
+              }
+            }
+          }
+        }
+      } catch (_) { /* opérateurs non disponibles : ignoré */ }
+
       const sorted = Object.keys(buckets).map(Number).sort((a, b) => b - a);
-      const pageRows = sorted.map(y => {
-        const items = buckets[y].sort((a, b) => a.x - b.x);
+      const pageRows = sorted.map(yKey => {
+        const items = buckets[yKey].sort((a, b) => a.x - b.x);
         const text = items.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
-        const leftText = items.filter(i => i.x < midX).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+        const leftText  = items.filter(i => i.x < midX).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
         const rightText = items.filter(i => i.x >= midX).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
-        return { text, leftText, rightText };
+        // Associe le carton le plus proche par Y (±15 unités PDF)
+        const nearby = cardRects.filter(cr => Math.abs(cr.y - yKey) <= 15);
+        const yellowCard = nearby.some(cr => cr.isYellow);
+        const redCard    = nearby.some(cr => cr.isRed);
+        return { text, leftText, rightText, rawY: yKey, yellowCard, redCard };
       }).filter(r => r.text);
       pages.push(pageRows);
     }
@@ -763,14 +797,26 @@ function tryParseFdmiPdf(input) {
   });
 
   // Remplacements : calcule les minutes réelles (titulaire sorti / sub entré).
+  const diagnostic = { sections, remplacementRows: [], disciplineRows: [] };
   if (sections.REMPLACEMENT != null) {
     const remEnd = findNextSection(lines, sections.REMPLACEMENT + 1);
+    for (let i = sections.REMPLACEMENT + 1; i < remEnd; i++) {
+      if (rows[i]) diagnostic.remplacementRows.push({
+        text: rows[i].text, left: rows[i].leftText, right: rows[i].rightText
+      });
+    }
     parseRemplacementRows(rows, sections.REMPLACEMENT + 1, remEnd, players);
   }
 
   // Discipline : cartons jaunes / rouges.
   if (sections.DISCIPLINE != null) {
     const dispEnd = findNextSection(lines, sections.DISCIPLINE + 1);
+    for (let i = sections.DISCIPLINE + 1; i < dispEnd; i++) {
+      if (rows[i]) diagnostic.disciplineRows.push({
+        text: rows[i].text, left: rows[i].leftText, right: rows[i].rightText,
+        yellowCard: rows[i].yellowCard, redCard: rows[i].redCard
+      });
+    }
     parseDisciplineRows(rows, sections.DISCIPLINE + 1, dispEnd, players);
   }
 
@@ -778,7 +824,8 @@ function tryParseFdmiPdf(input) {
 
   return {
     match: { date, opponent: '', competition, homeTeamName, awayTeamName },
-    players
+    players,
+    diagnostic
   };
 }
 
@@ -789,9 +836,9 @@ function findFdmiSections(lines) {
     COMPOSITION: /^COMPOSITION$/,
     REMPLACANTS: /^REMPLA[ÇC]ANTS$/,
     BANC: /^BANC$/,
-    REMPLACEMENT: /^REMPLACEMENT$/,
-    DISCIPLINE: /^DISCIPLINE$/,
-    BLESSURES: /^BLESSURES$/,
+    REMPLACEMENT: /^REMPLACEMENTS?$/,
+    DISCIPLINE: /^(DISCIPLINE|SANCTIONS?|CARTONS?|AVERTISSEMENTS?|FAITS\s+DISCIPLINAIRES?)$/,
+    BLESSURES: /^BLESSURES?$/,
     BUTEURS: /^BUTEURS$/
   };
   lines.forEach((l, i) => {
@@ -901,51 +948,58 @@ function parseGoalLine(line) {
 }
 
 /* Parse les événements de substitution dans la section REMPLACEMENT.
-   Format par colonne : "<#out> - <OUT NAME> <licence> <#in> - <IN NAME> <licence> NN' + MM'"
-   On lit leftText (domicile) et rightText (extérieur) séparément quand possible.
+   Stratégie : pour chaque ligne, on repère les refs joueurs (#NN - NOM) et les minutes
+   dans l'ordre de position, puis on associe chaque paire (out, in) à la minute qui suit.
+   Si leftText/rightText sont disponibles, on traite les colonnes séparément.
    Met à jour les minutes des joueurs impactés.
 */
 function parseRemplacementRows(rows, fromIdx, toIdx, players) {
-  // Indexe les joueurs par équipe + numéro pour recherche rapide.
+  // Index par "team#number" (prioritaire) et par numéro seul (fallback sans colonnes).
   const byTeamNum = {};
+  const byNum = {};
   players.forEach(p => {
-    if (p.team && p.number) byTeamNum[p.team + '#' + p.number] = p;
+    if (p.number) {
+      if (p.team) byTeamNum[p.team + '#' + p.number] = p;
+      if (!byNum[p.number]) byNum[p.number] = p; // conserve le premier trouvé
+    }
   });
 
-  // Table in/out par joueur pour recalculer le temps de jeu à la fin.
-  const inMin = new Map();   // player -> minute d'entrée
-  const outMin = new Map();  // player -> minute de sortie
+  const inMin = new Map();
+  const outMin = new Map();
 
-  function applyColumnEvents(colText, team) {
-    if (!colText) return;
-    // Récupère minutes (peut y avoir plusieurs événements sur une même ligne)
-    const eventRe = /(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]*?)\s+(?:[A-ZÀ-Ö][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-Ö][a-zà-öø-ÿ]+)*\s+)?(\d{9,10})?/g;
-    const minuteRe = /(\d{1,3})'\s*\+\s*\d+'/g;
+  // Tokenise un texte : retourne liste de {type:'ref'|'min', number?, minute?, pos}.
+  function remTokenize(text) {
+    if (!text) return [];
+    const tokens = [];
+    // Ref : "NN - NOM" (mots supplémentaires doivent avoir ≥2 lettres majuscules)
+    const refRe = /(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-']*(?:\s+[A-ZÀ-Ö][A-ZÀ-Ö\-']+)*)/g;
+    const minRe = /(\d{1,3})'\s*\+\s*\d+'/g;
+    let m;
+    while ((m = refRe.exec(text)) !== null)
+      tokens.push({ type: 'ref', number: m[1], pos: m.index });
+    while ((m = minRe.exec(text)) !== null)
+      tokens.push({ type: 'min', minute: Number(m[1]), pos: m.index });
+    return tokens.sort((a, b) => a.pos - b.pos);
+  }
 
-    // Collecte tous les numéros de joueurs mentionnés dans l'ordre
-    const playerRefs = [];
-    const simpleRefRe = /(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]+?)(?=\s+(?:[A-ZÀ-Ö][a-zà-öø-ÿ]|\d{9,10}|\d{1,3}'|$))/g;
-    let rm;
-    while ((rm = simpleRefRe.exec(colText)) !== null) {
-      playerRefs.push({ number: rm[1], last: rm[2].trim() });
-    }
-
-    const minutes = [];
-    let mm;
-    while ((mm = minuteRe.exec(colText)) !== null) {
-      minutes.push(Number(mm[1]));
-    }
-    if (minutes.length === 0 || playerRefs.length < 2) return;
-
-    // Un événement = paire (out, in) + minute. On apparie dans l'ordre.
-    for (let i = 0; i < minutes.length && i * 2 + 1 < playerRefs.length; i++) {
-      const outRef = playerRefs[i * 2];
-      const inRef = playerRefs[i * 2 + 1];
-      const minute = minutes[i];
-      const outP = byTeamNum[team + '#' + outRef.number];
-      const inP = byTeamNum[team + '#' + inRef.number];
-      if (outP) outMin.set(outP, minute);
-      if (inP) inMin.set(inP, minute);
+  // Apparie paires (out, in) → minute dans un flux de tokens, pour une équipe donnée.
+  function remApply(tokens, team) {
+    const lookup = n => team ? (byTeamNum[team + '#' + n] || null) : (byNum[n] || null);
+    let pending = [];
+    for (const tok of tokens) {
+      if (tok.type === 'ref') {
+        pending.push(tok);
+      } else {
+        while (pending.length >= 2) {
+          const outRef = pending.shift();
+          const inRef  = pending.shift();
+          const outP = lookup(outRef.number);
+          const inP  = lookup(inRef.number);
+          if (outP) outMin.set(outP, tok.minute);
+          if (inP)  inMin.set(inP,  tok.minute);
+        }
+        pending = [];
+      }
     }
   }
 
@@ -953,68 +1007,92 @@ function parseRemplacementRows(rows, fromIdx, toIdx, players) {
     const row = rows[i];
     if (!row) continue;
     if (row.leftText || row.rightText) {
-      applyColumnEvents(row.leftText, 'home');
-      applyColumnEvents(row.rightText, 'away');
+      remApply(remTokenize(row.leftText), 'home');
+      remApply(remTokenize(row.rightText), 'away');
     } else {
-      // Fallback : pas d'info colonne (ex. tests en texte brut) — on tente les deux équipes.
-      applyColumnEvents(row.text, 'home');
-      applyColumnEvents(row.text, 'away');
+      // Pas de colonnes : on déduit l'équipe en cherchant le joueur dans les deux équipes
+      remApply(remTokenize(row.text), null);
     }
   }
 
-  // Applique : titulaire sorti => minutes = outMin, sub entré => minutes = 90 - inMin.
-  const FULL = 90;
+  // Applique : titulaire sorti → minutes = outMin ; sub entré → minutes = 90 − inMin.
   players.forEach(p => {
     const i = inMin.get(p);
     const o = outMin.get(p);
     if (p.starter) {
       if (o != null) p.minutes = o;
     } else if (!p.didNotPlay) {
-      if (i != null) {
-        p.minutes = o != null ? Math.max(0, o - i) : Math.max(0, FULL - i);
-      }
+      if (i != null) p.minutes = o != null ? Math.max(0, o - i) : Math.max(0, 90 - i);
     }
   });
 }
 
 /* Parse la section DISCIPLINE.
-   Format observé : "<Equipe> <licence> <#> - <NOM> <Prénom> <motif> <couleur?> NN' + MM'"
-   Couleur par défaut : jaune. Rouge détectée via mots-clés (exclusion / 2ème avertissement).
+   Les cartons sont des rectangles colorés dans le PDF (pas du texte).
+   On utilise les flags yellowCard/redCard posés lors de l'extraction PDF (getOperatorList).
+   On identifie ensuite le joueur par le numéro de licence ou de maillot présent sur la même ligne.
 */
 function parseDisciplineRows(rows, fromIdx, toIdx, players) {
-  const lines = [];
-  for (let i = fromIdx; i < toIdx; i++) {
-    if (rows[i]) lines.push(rows[i].text);
-  }
-  const refRe = /(\d{9,10})\s+(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]*?)\s+[A-ZÀ-Ö][a-zà-öø-ÿ]/g;
-  const redRe = /\b(rouge|exclusion|2\s*[eèé]me?\s+avertissement|second\s+avertissement)\b/i;
+  // Index licence → player
+  const byLicence = {};
+  players.forEach(p => { if (p.licence) byLicence[p.licence] = p; });
 
-  for (const line of lines) {
-    // Passe les en-têtes du tableau
-    if (/^Equipe\b/i.test(line) || /^[A-ZÀ-Ö\s]+$/.test(line.trim())) continue;
-    let rm;
-    // Reset regex state pour chaque ligne
-    refRe.lastIndex = 0;
-    while ((rm = refRe.exec(line)) !== null) {
-      const number = rm[2];
-      const last = rm[3].trim();
-      const isRed = redRe.test(line);
-      // Trouve le joueur : par numéro + nom normalisé
-      const nLast = normalizeName(last);
-      const target = players.find(p =>
-        String(p.number) === String(number) &&
-        (normalizeName(p.lastName) === nLast || normalizeName(p.lastName).includes(nLast))
-      );
-      if (target) {
-        if (isRed) target.redCards = (target.redCards || 0) + 1;
-        else target.yellowCards = (target.yellowCards || 0) + 1;
+  for (let i = fromIdx; i < toIdx; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    // Si aucun carton détecté via les rectangles PDF → tente la méthode texte (carton rouge = mot-clé)
+    const hasVisualCard = row.yellowCard || row.redCard;
+    const isRed = row.redCard || /\b(rouge|exclusion|2\s*[eèé]me?\s*avertissement)\b/i.test(row.text);
+    const isYellow = !isRed && (row.yellowCard || false);
+    if (!hasVisualCard) {
+      // Pas de flag visuel : on essaie de détecter via mots-clés (rouge seulement, jaune ambigu)
+      if (!/\b(rouge|exclusion|jaune|avertissement)\b/i.test(row.text)) continue;
+    }
+
+    const line = row.text;
+    if (/^Equipe\b/i.test(line)) continue;
+
+    // Cherche d'abord par licence (10 chiffres)
+    let target = null;
+    const licenceM = line.match(/\b(\d{9,10})\b/);
+    if (licenceM) target = byLicence[licenceM[1]];
+
+    // Sinon par numéro de maillot dans la ligne
+    if (!target) {
+      const numM = line.match(/\b(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-']+)/);
+      if (numM) {
+        const num = numM[1], nLast = normalizeName(numM[2]);
+        target = players.find(p =>
+          String(p.number) === num &&
+          normalizeName(p.lastName).startsWith(nLast.slice(0, 4))
+        );
       }
+    }
+
+    if (target) {
+      if (isRed) target.redCards = (target.redCards || 0) + 1;
+      else        target.yellowCards = (target.yellowCards || 0) + 1;
     }
   }
 }
 
+function buildDiagText(parsed, rawLines) {
+  const d = parsed && parsed.diagnostic;
+  if (!d) return '';
+  const secNames = Object.entries(d.sections)
+    .map(([k, v]) => `${k}@ligne${v}`).join(' · ');
+  const remLines = (d.remplacementRows || []).map((r, i) =>
+    `[${i}] TEXT: ${r.text}\n    LEFT: ${r.left || '(vide)'}\n    RIGHT: ${r.right || '(vide)'}`
+  ).join('\n');
+  const discLines = (d.disciplineRows || []).map((r, i) =>
+    `[${i}] TEXT: ${r.text}\n    🟨=${r.yellowCard || false} 🟥=${r.redCard || false}\n    LEFT: ${r.left || '(vide)'}\n    RIGHT: ${r.right || '(vide)'}`
+  ).join('\n');
+  return `=== SECTIONS DETECTÉES ===\n${secNames || '(aucune)'}\n\n=== REMPLACEMENT (${(d.remplacementRows||[]).length} lignes) ===\n${remLines || '(section non trouvée)'}\n\n=== DISCIPLINE (${(d.disciplineRows||[]).length} lignes) ===\n${discLines || '(section non trouvée)'}`;
+}
+
 function openPdfFdmiModal(rawLines, parsed) {
   const sample = rawLines.slice(0, 200).join('\n');
+  const diagText = buildDiagText(parsed, rawLines);
   const playersHtml = parsed && parsed.players.length
     ? `<div class="hint" style="margin-top:8px;">${parsed.players.length} joueurs détectés automatiquement.</div>`
     : `<div class="hint" style="margin-top:8px; color:var(--warning);">Aucun joueur détecté. Copiez le texte brut ci-dessous et envoyez-le à votre assistant pour adapter le parseur.</div>`;
@@ -1024,8 +1102,13 @@ function openPdfFdmiModal(rawLines, parsed) {
     ${playersHtml}
     ${parsed ? renderParsedPreview(parsed) : ''}
     <div class="matches-section">
+      <h4>🔍 Diagnostic REMPLACEMENT & DISCIPLINE</h4>
+      <textarea readonly id="diag-area" style="width:100%; height:160px; font-family:monospace; font-size:10px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px;">${escapeHtml(diagText)}</textarea>
+      <button class="btn small" id="copy-diag" style="margin-top:4px;">📋 Copier le diagnostic</button>
+    </div>
+    <div class="matches-section">
       <h4>Texte brut extrait du PDF (${rawLines.length} lignes)</h4>
-      <textarea readonly style="width:100%; height:240px; font-family:monospace; font-size:11px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px;">${escapeHtml(sample)}</textarea>
+      <textarea readonly style="width:100%; height:180px; font-family:monospace; font-size:11px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px;">${escapeHtml(sample)}</textarea>
       <button class="btn small" id="copy-raw" style="margin-top:6px;">📋 Copier le texte brut</button>
     </div>
     <div class="modal-actions">
@@ -1034,9 +1117,12 @@ function openPdfFdmiModal(rawLines, parsed) {
     </div>
   `);
 
+  document.getElementById('copy-diag').addEventListener('click', () => {
+    navigator.clipboard.writeText(diagText);
+    alert('Diagnostic copié !');
+  });
+
   document.getElementById('copy-raw').addEventListener('click', () => {
-    const ta = document.querySelector('.modal textarea');
-    ta.select();
     navigator.clipboard.writeText(rawLines.join('\n'));
     alert('Texte copié dans le presse-papier.');
   });
