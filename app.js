@@ -604,6 +604,146 @@ document.getElementById('import-fdmi').addEventListener('change', async e => {
   e.target.value = '';
 });
 
+/* ---------- Import FDMI PDF ---------- */
+document.getElementById('import-fdmi-pdf').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!window.pdfjsLib) {
+    alert('PDF.js n\'est pas chargé. Vérifiez votre connexion internet.');
+    return;
+  }
+  try {
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      // Groupe les items par ligne (même coordonnée Y, à 2 pixels près)
+      const lines = {};
+      content.items.forEach(it => {
+        const y = Math.round(it.transform[5]);
+        const key = Math.floor(y / 3) * 3; // bucket 3px pour tolérer petites variations
+        if (!lines[key]) lines[key] = [];
+        lines[key].push({ x: it.transform[4], text: it.str });
+      });
+      const sorted = Object.keys(lines).map(Number).sort((a, b) => b - a);
+      const pageLines = sorted.map(y =>
+        lines[y].sort((a, b) => a.x - b.x).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim()
+      ).filter(Boolean);
+      pages.push(pageLines);
+    }
+    const allLines = pages.flat();
+    const parsed = tryParseFdmiPdf(allLines);
+    openPdfFdmiModal(allLines, parsed);
+  } catch (err) {
+    console.error(err);
+    alert('Erreur à la lecture du PDF : ' + err.message);
+  }
+  e.target.value = '';
+});
+
+/* Tente d'extraire la FDMI depuis les lignes de texte du PDF.
+   Les FDMI FFF suivent un format récurrent qu'on va affiner après
+   avoir vu le texte réel. Pour la v1 on retourne null et on affiche
+   le texte brut pour copie/inspection. */
+function tryParseFdmiPdf(lines) {
+  const joined = lines.join('\n');
+
+  // Cherche une date au format JJ/MM/AAAA ou AAAA-MM-JJ
+  const dateMatch = joined.match(/\b(\d{2})\/(\d{2})\/(\d{4})\b/);
+  const date = dateMatch ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}` : '';
+
+  // Patterns possibles pour une ligne joueur :
+  //  "9 EL KHOUMISTI Fahd 90"           (numéro NOM Prénom minutes)
+  //  "9 Fahd EL KHOUMISTI"               (numéro Prénom NOM)
+  //  "9 EL KHOUMISTI F."                 (initiale)
+  const playerLineRe = /^(\d{1,2})\s+([A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ\s'\-]+?)\s+([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+)*)\s*(\d{1,3})?$/;
+  const playerLineAltRe = /^(\d{1,2})\s+([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+(?:\s+[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ\-']+)*)\s+([A-ZÀ-ÖØ-Þ][A-ZÀ-ÖØ-Þ\s'\-]+?)\s*(\d{1,3})?$/;
+
+  const players = [];
+  lines.forEach(line => {
+    const m = line.match(playerLineRe) || line.match(playerLineAltRe);
+    if (!m) return;
+    const [, number, a, b, min] = m;
+    // Détermine qui est le nom (tout majuscules) et qui est le prénom
+    const aIsUpper = a === a.toUpperCase();
+    const lastName = aIsUpper ? a.trim() : b.trim();
+    const firstName = aIsUpper ? b.trim() : a.trim();
+    if (players.some(p => p.number === number)) return; // dédup
+    players.push({
+      number,
+      firstName,
+      lastName,
+      starter: null,
+      minutes: min ? Number(min) : null,
+      goals: 0,
+      assists: 0
+    });
+  });
+
+  if (players.length < 3) return null; // pas assez pour considérer que c'est fiable
+
+  return { match: { date, opponent: '', competition: '' }, players };
+}
+
+function openPdfFdmiModal(rawLines, parsed) {
+  const sample = rawLines.slice(0, 200).join('\n');
+  const playersHtml = parsed && parsed.players.length
+    ? `<div class="hint" style="margin-top:8px;">${parsed.players.length} joueurs détectés automatiquement.</div>`
+    : `<div class="hint" style="margin-top:8px; color:var(--warning);">Aucun joueur détecté. Copiez le texte brut ci-dessous et envoyez-le à votre assistant pour adapter le parseur.</div>`;
+
+  openModal(`
+    <h3>Import FDMI PDF</h3>
+    ${playersHtml}
+    ${parsed ? renderParsedPreview(parsed) : ''}
+    <div class="matches-section">
+      <h4>Texte brut extrait du PDF (${rawLines.length} lignes)</h4>
+      <textarea readonly style="width:100%; height:240px; font-family:monospace; font-size:11px; background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px;">${escapeHtml(sample)}</textarea>
+      <button class="btn small" id="copy-raw" style="margin-top:6px;">📋 Copier le texte brut</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Fermer</button>
+      ${parsed ? `<button class="btn primary" id="confirm-pdf-import">Continuer vers l'appariement</button>` : ''}
+    </div>
+  `);
+
+  document.getElementById('copy-raw').addEventListener('click', () => {
+    const ta = document.querySelector('.modal textarea');
+    ta.select();
+    navigator.clipboard.writeText(rawLines.join('\n'));
+    alert('Texte copié dans le presse-papier.');
+  });
+
+  if (parsed) {
+    document.getElementById('confirm-pdf-import').addEventListener('click', () => {
+      closeModal();
+      openFdmiPreviewModal(parsed);
+    });
+  }
+}
+
+function renderParsedPreview(parsed) {
+  return `
+    <div class="matches-section">
+      <h4>Aperçu des joueurs détectés</h4>
+      <table class="matches-table">
+        <thead><tr><th>#</th><th>Prénom</th><th>Nom</th><th class="num">Min</th></tr></thead>
+        <tbody>
+          ${parsed.players.map(p => `
+            <tr>
+              <td>${escapeHtml(p.number)}</td>
+              <td>${escapeHtml(p.firstName)}</td>
+              <td>${escapeHtml(p.lastName)}</td>
+              <td class="num">${p.minutes ?? '?'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function normalizeName(s) {
   return String(s || '').toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')

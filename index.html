@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Suivi & Projection d'Effectif</title>
   <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
 </head>
 <body>
   <header class="app-header">
@@ -23,11 +30,15 @@
       <div class="panel-header">
         <h2>Effectif actuel</h2>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <label class="btn primary">
+            📥 Importer FDMI (PDF)
+            <input type="file" id="import-fdmi-pdf" accept="application/pdf" hidden />
+          </label>
           <label class="btn">
-            📥 Importer une FDMI
+            JSON
             <input type="file" id="import-fdmi" accept="application/json" hidden />
           </label>
-          <button class="btn primary" id="add-player-btn">+ Ajouter un joueur</button>
+          <button class="btn" id="add-player-btn">+ Ajouter un joueur</button>
         </div>
       </div>
 
