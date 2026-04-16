@@ -1375,11 +1375,11 @@ function parseSquadExcelGrid(grid) {
   }
   if (headerRowIdx === -1) headerRowIdx = 7; // fallback
 
-  // Lignes de métadonnées matchs (au-dessus de la ligne d'en-têtes)
-  const datesRow     = grid[0] || [];
-  const opponentsRow = grid[1] || [];
-  const venuesRow    = grid[2] || [];
-  const resultsRow   = grid[3] || [];
+  // Lignes de métadonnées matchs (calculées relativement à la ligne d'en-têtes)
+  const datesRow     = grid[headerRowIdx - 7] || grid[0] || [];
+  const opponentsRow = grid[headerRowIdx - 6] || grid[1] || [];
+  const venuesRow    = grid[headerRowIdx - 5] || grid[2] || [];
+  const resultsRow   = grid[headerRowIdx - 4] || grid[3] || [];
   const headerRow    = grid[headerRowIdx] || [];
 
   // --- Détection de la première colonne de match ---
