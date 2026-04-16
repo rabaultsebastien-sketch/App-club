@@ -1359,8 +1359,9 @@ function excelDateToIso(v) {
   return s;
 }
 
-function parseSquadExcelGrid(grid) {
+function parseSquadExcelGrid(grid, colorMap) {
   if (!grid || grid.length < 5) throw new Error('Feuille trop courte.');
+  colorMap = colorMap || {};
 
   // --- Détection dynamique de la ligne d'en-têtes joueurs ---
   // On cherche la ligne qui contient "N°" (ou un entier) en col 0 et "Prénom"/"Nom" en col 1-2
@@ -1452,8 +1453,16 @@ function parseSquadExcelGrid(grid) {
       const minutes = Number(row[m.col + 1]) || 0;
       const goals   = Number(row[m.col + 2]) || 0;
       const assists = Number(row[m.col + 3]) || 0;
-      const yellowCards = Number(row[m.col + 4]) || 0;
-      const redCards    = Number(row[m.col + 5]) || 0;
+      // Cartons : soit valeur numérique dans la cellule, soit cellule colorée (jaune/rouge)
+      let yellowCards = Number(row[m.col + 4]) || 0;
+      let redCards    = Number(row[m.col + 5]) || 0;
+      const yColor = classifyCardColor(colorMap[`${r},${m.col + 4}`]);
+      const rColor = classifyCardColor(colorMap[`${r},${m.col + 5}`]);
+      if (yColor === 'yellow' && !yellowCards) yellowCards = 1;
+      if (rColor === 'red' && !redCards) redCards = 1;
+      // Fallback : certaines feuilles n'ont qu'UNE colonne "cartons" coloriée dans l'une des deux
+      if (yColor === 'red' && !redCards) redCards = 1;
+      if (rColor === 'yellow' && !yellowCards) yellowCards = 1;
       playerMatches.push({
         id: uid(),
         date: m.date, opponent: m.opponent, venue: m.venue, result: m.result,
@@ -1493,15 +1502,102 @@ async function readSpreadsheetFile(file) {
   const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
   const sheetName = wb.SheetNames[0];
   const sheet = wb.Sheets[sheetName];
-  return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+
+  // Détection des cellules colorées (cartons jaunes / rouges) via parsing XML du xlsx
+  let colorMap = null;
+  const isXlsx = /\.xlsx$/i.test(file.name);
+  if (isXlsx && window.JSZip) {
+    try {
+      colorMap = await extractCellColors(buffer);
+      console.log('[Excel import] colorMap size:', colorMap ? Object.keys(colorMap).length : 0);
+    } catch (err) {
+      console.warn('[Excel import] Impossible de lire les couleurs:', err);
+    }
+  }
+  return { grid, colorMap };
+}
+
+/**
+ * Extrait la couleur de fond de chaque cellule du 1er onglet d'un xlsx.
+ * Retourne un dict { "r,c": "FFFF00" }.
+ */
+async function extractCellColors(buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  const stylesXml = await zip.file('xl/styles.xml').async('string');
+  const sheetFile = zip.file('xl/worksheets/sheet1.xml')
+    || Object.values(zip.files).find(f => /xl\/worksheets\/sheet\d+\.xml$/i.test(f.name));
+  if (!sheetFile) throw new Error('Sheet XML introuvable');
+  const sheetXml = await sheetFile.async('string');
+
+  // Parse les fills depuis styles.xml
+  const parser = new DOMParser();
+  const stylesDoc = parser.parseFromString(stylesXml, 'application/xml');
+  const fills = Array.from(stylesDoc.getElementsByTagName('fill')).map(fillEl => {
+    const pf = fillEl.getElementsByTagName('patternFill')[0];
+    if (!pf) return null;
+    const fg = pf.getElementsByTagName('fgColor')[0];
+    if (!fg) return null;
+    const rgb = fg.getAttribute('rgb');
+    return rgb ? rgb.toUpperCase() : null;
+  });
+  // cellXfs.xf[i].fillId → index dans fills[]
+  const cellXfs = stylesDoc.getElementsByTagName('cellXfs')[0];
+  const xfs = cellXfs ? Array.from(cellXfs.getElementsByTagName('xf')) : [];
+  const xfFillIdx = xfs.map(xf => parseInt(xf.getAttribute('fillId') || '0', 10));
+
+  // Parse les cellules de la feuille
+  const sheetDoc = parser.parseFromString(sheetXml, 'application/xml');
+  const rows = sheetDoc.getElementsByTagName('row');
+  const colorMap = {};
+  for (const row of rows) {
+    const cells = row.getElementsByTagName('c');
+    for (const cell of cells) {
+      const ref = cell.getAttribute('r');
+      const sAttr = cell.getAttribute('s');
+      if (!ref || !sAttr) continue;
+      const xfIdx = parseInt(sAttr, 10);
+      const fillIdx = xfFillIdx[xfIdx];
+      const rgb = fills[fillIdx];
+      if (!rgb) continue;
+      // Convertit "A15" → {r:14, c:0}
+      const rc = refToRC(ref);
+      if (!rc) continue;
+      colorMap[`${rc.r},${rc.c}`] = rgb;
+    }
+  }
+  return colorMap;
+}
+
+function refToRC(ref) {
+  const m = /^([A-Z]+)(\d+)$/.exec(ref);
+  if (!m) return null;
+  let col = 0;
+  for (const ch of m[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
+  return { r: parseInt(m[2], 10) - 1, c: col - 1 };
+}
+
+/** Classe une couleur RGB (6 hex) en 'yellow', 'red' ou null. */
+function classifyCardColor(rgb) {
+  if (!rgb || rgb.length < 6) return null;
+  // rgb peut avoir un préfixe alpha: "FFFFFF00"
+  const hex = rgb.length === 8 ? rgb.slice(2) : rgb;
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  // Jaune : R et G élevés, B faible
+  if (r > 200 && g > 150 && b < 120) return 'yellow';
+  // Rouge : R élevé, G et B faibles
+  if (r > 180 && g < 100 && b < 100) return 'red';
+  return null;
 }
 
 document.getElementById('import-squad-xlsx')?.addEventListener('change', async e => {
   const file = e.target.files[0];
   if (!file) return;
   try {
-    const grid = await readSpreadsheetFile(file);
-    const parsed = parseSquadExcelGrid(grid);
+    const { grid, colorMap } = await readSpreadsheetFile(file);
+    const parsed = parseSquadExcelGrid(grid, colorMap);
     openSquadExcelPreview(parsed);
   } catch (err) {
     console.error(err);
@@ -1525,6 +1621,8 @@ function openSquadExcelPreview({ matches, players }) {
         <td class="num">${t.minutes}'</td>
         <td class="num">${t.goals}</td>
         <td class="num">${t.assists}</td>
+        <td class="num">${t.yellowCards}</td>
+        <td class="num">${t.redCards}</td>
       </tr>
     `;
   }).join('');
@@ -1539,6 +1637,7 @@ function openSquadExcelPreview({ matches, players }) {
             <th>#</th><th>Joueur</th><th>Poste</th>
             <th>M</th><th>T</th><th>R</th>
             <th>Min</th><th>B</th><th>PD</th>
+            <th>🟨</th><th>🟥</th>
           </tr>
         </thead>
         <tbody>${rowsHtml}</tbody>
