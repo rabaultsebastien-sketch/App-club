@@ -1375,15 +1375,9 @@ function parseSquadExcelGrid(grid) {
   }
   if (headerRowIdx === -1) headerRowIdx = 7; // fallback
 
-  // Lignes de métadonnées matchs (calculées relativement à la ligne d'en-têtes)
-  const datesRow     = grid[headerRowIdx - 7] || grid[0] || [];
-  const opponentsRow = grid[headerRowIdx - 6] || grid[1] || [];
-  const venuesRow    = grid[headerRowIdx - 5] || grid[2] || [];
-  const resultsRow   = grid[headerRowIdx - 4] || grid[3] || [];
-  const headerRow    = grid[headerRowIdx] || [];
+  const headerRow = grid[headerRowIdx] || [];
 
   // --- Détection de la première colonne de match ---
-  // Cherche le 2e "Poste" dans la ligne d'en-têtes (le 1er est la position du joueur)
   let posCount = 0;
   let firstMatchCol = -1;
   for (let c = 0; c < headerRow.length; c++) {
@@ -1394,33 +1388,48 @@ function parseSquadExcelGrid(grid) {
   }
   if (firstMatchCol === -1) firstMatchCol = 6;
 
-  // --- Détection des matchs en scannant la ligne des dates ---
-  // On cherche toutes les valeurs non-vides dans datesRow à partir de firstMatchCol.
-  // La date peut être décalée d'une colonne par rapport à "Poste" (merged cell dans Excel).
-  // On détermine le début du bloc match à partir de l'alignement modulo 7.
+  // --- Détection automatique des lignes de metadata ---
+  // On scanne TOUTES les lignes avant l'en-tête pour trouver dates, adversaires, lieu, résultat.
+  // On identifie la ligne "dates" comme celle avec le plus de valeurs dans les colonnes de match.
+  let datesRowIdx = -1, opponentsRowIdx = -1, venuesRowIdx = -1, resultsRowIdx = -1;
+  let maxDateCols = 0;
+  for (let r = 0; r < headerRowIdx; r++) {
+    const row = grid[r] || [];
+    let dateCols = 0;
+    for (let c = firstMatchCol; c < row.length; c++) {
+      const v = row[c];
+      if (v != null && v !== '') dateCols++;
+    }
+    if (dateCols > maxDateCols) { maxDateCols = dateCols; datesRowIdx = r; }
+  }
+
+  // Rows adjacentes à datesRowIdx pour adversaires / lieu / résultat
+  const datesRow     = datesRowIdx >= 0 ? (grid[datesRowIdx] || []) : [];
+  const opponentsRow = datesRowIdx >= 0 ? (grid[datesRowIdx + 1] || []) : [];
+  const venuesRow    = datesRowIdx >= 0 ? (grid[datesRowIdx + 2] || []) : [];
+  const resultsRow   = datesRowIdx >= 0 ? (grid[datesRowIdx + 3] || []) : [];
+
+  // --- Détection des matchs ---
   const allDateCells = [];
   for (let c = firstMatchCol - 1; c < datesRow.length; c++) {
     const v = datesRow[c];
     if (v != null && v !== '') allDateCells.push({ c, v });
   }
 
-  // Pour chaque date trouvée, détermine le début du bloc (modulo 7)
   const matches = [];
   const seenCols = new Set();
   for (const { c, v } of allDateCells) {
     const isoDate = excelDateToIso(v);
     if (!isoDate) continue;
-    // Aligne sur le bloc de 7 le plus proche en dessous
     const offset = (c - firstMatchCol) % 7;
-    const blockStart = offset >= 0 ? c - offset : c - (offset + 7);
-    const col = blockStart < firstMatchCol ? firstMatchCol : blockStart;
-    if (seenCols.has(col)) continue;
-    seenCols.add(col);
-    // Cherche l'adversaire dans la même zone de colonne
-    const opp = String(opponentsRow[c] || opponentsRow[col] || '').trim();
-    const venue = String(venuesRow[c] || venuesRow[col] || '').trim();
-    const result = String(resultsRow[c] || resultsRow[col] || '').trim();
-    matches.push({ col, date: isoDate, opponent: opp, venue, result });
+    const col = offset >= 0 ? c - offset : c - (offset + 7);
+    const safeCol = col < firstMatchCol ? firstMatchCol : col;
+    if (seenCols.has(safeCol)) continue;
+    seenCols.add(safeCol);
+    const opp = String(opponentsRow[c] || opponentsRow[safeCol] || '').trim();
+    const venue = String(venuesRow[c] || venuesRow[safeCol] || '').trim();
+    const result = String(resultsRow[c] || resultsRow[safeCol] || '').trim();
+    matches.push({ col: safeCol, date: isoDate, opponent: opp, venue, result });
   }
   matches.sort((a, b) => a.col - b.col);
 
@@ -1464,11 +1473,14 @@ function parseSquadExcelGrid(grid) {
   // Diagnostic console pour debug
   console.log('[Excel import] headerRowIdx=', headerRowIdx, 'firstMatchCol=', firstMatchCol);
   console.log('[Excel import] matches=', matches.length, 'players=', players.length);
-  console.log('[Excel import] grid[0] (dates row):', JSON.stringify((grid[0]||[]).slice(0,15)));
-  console.log('[Excel import] grid[1] (adv row):', JSON.stringify((grid[1]||[]).slice(0,15)));
-  console.log('[Excel import] headerRow cols 0-8:', JSON.stringify((grid[headerRowIdx]||[]).slice(0,9)));
-  console.log('[Excel import] 1er joueur cols 0-9:', JSON.stringify((grid[headerRowIdx+1]||[]).slice(0,9)));
-  console.log('[Excel import] allDateCells found:', JSON.stringify(allDateCells.slice(0,5)));
+  console.log('[Excel import] datesRow (idx ' + (headerRowIdx-7) + '):', JSON.stringify(datesRow.slice(0,15)));
+  for (let _r = 0; _r < headerRowIdx; _r++) {
+    const _row = grid[_r] || [];
+    const _nonEmpty = _row.slice(0,20).filter(v => v !== '' && v != null);
+    if (_nonEmpty.length > 0) console.log('[Excel import] row[' + _r + ']:', JSON.stringify(_row.slice(0,15)));
+  }
+  console.log('[Excel import] headerRow:', JSON.stringify((grid[headerRowIdx]||[]).slice(0,9)));
+  console.log('[Excel import] 1er joueur:', JSON.stringify((grid[headerRowIdx+1]||[]).slice(0,9)));
 
   return { matches, players };
 }
