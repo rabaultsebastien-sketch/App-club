@@ -109,14 +109,12 @@ function renderSquad() {
         <div class="stats">
           <div class="stat-box"><div class="n">${t.matches}</div><div class="l">Matchs</div></div>
           <div class="stat-box"><div class="n">${t.minutes}'</div><div class="l">Minutes</div></div>
-          <div class="stat-box"><div class="n">${t.goals}</div><div class="l">Buts</div></div>
-          <div class="stat-box"><div class="n">${t.assists}</div><div class="l">Passes D</div></div>
-        </div>
-        <div class="stats" style="grid-template-columns: repeat(2, 1fr);">
           <div class="stat-box"><div class="n">${t.starts}</div><div class="l">Titulaire</div></div>
           <div class="stat-box"><div class="n">${t.subs}</div><div class="l">Remplaçant</div></div>
         </div>
-        <div class="stats" style="grid-template-columns: repeat(2, 1fr);">
+        <div class="stats">
+          <div class="stat-box"><div class="n">${t.goals}</div><div class="l">Buts</div></div>
+          <div class="stat-box"><div class="n">${t.assists}</div><div class="l">Passes D</div></div>
           <div class="stat-box"><div class="n">${t.yellowCards}</div><div class="l">🟨 Jaunes</div></div>
           <div class="stat-box"><div class="n">${t.redCards}</div><div class="l">🟥 Rouges</div></div>
         </div>
