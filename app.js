@@ -586,6 +586,127 @@ document.getElementById('reset-btn').addEventListener('click', () => {
 });
 
 /* =========================================================
+   IMPORT FDMI (feuille de match Footclubs)
+   ========================================================= */
+document.getElementById('import-fdmi').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const fdmi = JSON.parse(text);
+    if (!fdmi.players || !Array.isArray(fdmi.players)) {
+      throw new Error('Ce fichier ne contient pas de liste de joueurs (clé "players").');
+    }
+    openFdmiPreviewModal(fdmi);
+  } catch (err) {
+    alert('Erreur à la lecture du fichier : ' + err.message);
+  }
+  e.target.value = '';
+});
+
+function normalizeName(s) {
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function matchSquadPlayer(fdmiPlayer) {
+  const num = fdmiPlayer.number ? String(fdmiPlayer.number) : '';
+  if (num) {
+    const byNum = state.squad.find(p => String(p.number) === num);
+    if (byNum) return byNum;
+  }
+  const fln = normalizeName(fdmiPlayer.lastName);
+  const ffn = normalizeName(fdmiPlayer.firstName);
+  return state.squad.find(p =>
+    normalizeName(p.lastName) === fln && normalizeName(p.firstName) === ffn
+  ) || state.squad.find(p => normalizeName(p.lastName) === fln);
+}
+
+function openFdmiPreviewModal(fdmi) {
+  const matchInfo = fdmi.match || {};
+  const rows = fdmi.players.map((fp, i) => {
+    const squadP = matchSquadPlayer(fp);
+    return { fp, squadP, index: i, include: !!squadP && (fp.minutes > 0 || fp.starter) };
+  });
+
+  const matched = rows.filter(r => r.squadP).length;
+  const unmatched = rows.filter(r => !r.squadP);
+
+  openModal(`
+    <h3>Aperçu FDMI</h3>
+    <div class="card-sub" style="margin-bottom:10px;">
+      ${matchInfo.date ? '📅 ' + escapeHtml(matchInfo.date) : ''}
+      ${matchInfo.opponent ? ' · vs ' + escapeHtml(matchInfo.opponent) : ''}
+      ${matchInfo.competition ? ' · ' + escapeHtml(matchInfo.competition) : ''}
+    </div>
+    <div class="hint" style="margin-bottom:10px;">
+      ${matched} / ${rows.length} joueurs appariés avec votre effectif.
+      ${unmatched.length > 0 ? ` <span style="color:var(--warning)">${unmatched.length} non reconnu(s).</span>` : ''}
+    </div>
+    <div class="form-row" style="margin-bottom:10px;">
+      <label>Date du match<input type="date" id="fdmi-date" value="${escapeAttr(matchInfo.date || new Date().toISOString().slice(0,10))}" /></label>
+      <label>Adversaire<input id="fdmi-opponent" value="${escapeAttr(matchInfo.opponent || '')}" /></label>
+    </div>
+    <table class="matches-table" style="margin-top:10px;">
+      <thead>
+        <tr>
+          <th style="width:30px;">✓</th>
+          <th>Joueur FDMI</th>
+          <th>Apparié avec</th>
+          <th class="num">T/R</th>
+          <th class="num">Min</th>
+          <th class="num">B</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr style="${r.squadP ? '' : 'opacity:0.5;'}">
+            <td><input type="checkbox" data-i="${r.index}" ${r.include ? 'checked' : ''} ${r.squadP ? '' : 'disabled'}></td>
+            <td>${r.fp.number ? '#' + escapeHtml(r.fp.number) + ' ' : ''}${escapeHtml(r.fp.firstName)} ${escapeHtml(r.fp.lastName)}</td>
+            <td>${r.squadP ? escapeHtml(r.squadP.firstName + ' ' + r.squadP.lastName) : '<em>non trouvé</em>'}</td>
+            <td class="num">${r.fp.starter ? 'T' : 'R'}</td>
+            <td class="num">${r.fp.minutes || 0}'</td>
+            <td class="num">${r.fp.goals || 0}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <div class="modal-actions">
+      <button class="btn" data-close>Annuler</button>
+      <button class="btn primary" id="fdmi-confirm">Importer dans l'effectif</button>
+    </div>
+  `);
+
+  document.getElementById('fdmi-confirm').addEventListener('click', () => {
+    const date = document.getElementById('fdmi-date').value;
+    const opponent = document.getElementById('fdmi-opponent').value;
+    const included = new Set(
+      [...document.querySelectorAll('input[type="checkbox"][data-i]:checked')]
+        .map(cb => Number(cb.dataset.i))
+    );
+    let added = 0;
+    rows.forEach(r => {
+      if (!included.has(r.index) || !r.squadP) return;
+      r.squadP.matches = r.squadP.matches || [];
+      r.squadP.matches.push({
+        id: uid(),
+        date,
+        opponent,
+        starter: !!r.fp.starter,
+        minutes: Number(r.fp.minutes) || 0,
+        goals: Number(r.fp.goals) || 0,
+        assists: Number(r.fp.assists) || 0,
+        notes: 'Import FDMI'
+      });
+      added++;
+    });
+    saveState(); closeModal(); renderSquad();
+    alert(`✅ ${added} performance(s) ajoutée(s).`);
+  });
+}
+
+/* =========================================================
    MODAL infrastructure
    ========================================================= */
 function openModal(html) {

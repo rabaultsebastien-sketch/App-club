@@ -1,0 +1,13 @@
+{
+  "name": "app-club",
+  "version": "1.0.0",
+  "description": "Suivi et projection d'effectif - Import FDMI Footclubs",
+  "private": true,
+  "scripts": {
+    "import-match": "node scripts/import-footclubs.js",
+    "import-match:latest": "node scripts/import-footclubs.js --latest"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

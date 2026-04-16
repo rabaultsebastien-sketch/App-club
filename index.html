@@ -22,7 +22,13 @@
     <section id="squad" class="panel active">
       <div class="panel-header">
         <h2>Effectif actuel</h2>
-        <button class="btn primary" id="add-player-btn">+ Ajouter un joueur</button>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <label class="btn">
+            📥 Importer une FDMI
+            <input type="file" id="import-fdmi" accept="application/json" hidden />
+          </label>
+          <button class="btn primary" id="add-player-btn">+ Ajouter un joueur</button>
+        </div>
       </div>
 
       <div class="filters">
