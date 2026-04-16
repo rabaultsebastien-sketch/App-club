@@ -1452,12 +1452,14 @@ function parseSquadExcelGrid(grid) {
       const minutes = Number(row[m.col + 1]) || 0;
       const goals   = Number(row[m.col + 2]) || 0;
       const assists = Number(row[m.col + 3]) || 0;
+      const yellowCards = Number(row[m.col + 4]) || 0;
+      const redCards    = Number(row[m.col + 5]) || 0;
       playerMatches.push({
         id: uid(),
         date: m.date, opponent: m.opponent, venue: m.venue, result: m.result,
         starter: status === 'T',
         minutes, goals, assists,
-        yellowCards: 0, redCards: 0,
+        yellowCards, redCards,
         notes: 'Import Excel'
       });
     }
