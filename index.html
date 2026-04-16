@@ -6,6 +6,7 @@
   <title>Suivi & Projection d'Effectif</title>
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script>
     if (window.pdfjsLib) {
       pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -31,12 +32,8 @@
         <h2>Effectif actuel</h2>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <label class="btn primary">
-            📥 Importer FDMI (PDF)
-            <input type="file" id="import-fdmi-pdf" accept="application/pdf" hidden />
-          </label>
-          <label class="btn">
-            JSON
-            <input type="file" id="import-fdmi" accept="application/json" hidden />
+            📥 Importer Excel (saison)
+            <input type="file" id="import-squad-xlsx" accept=".xlsx,.xls,.csv,.tsv" hidden />
           </label>
           <button class="btn" id="add-player-btn">+ Ajouter un joueur</button>
         </div>

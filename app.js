@@ -606,7 +606,7 @@ document.getElementById('reset-btn').addEventListener('click', () => {
 /* =========================================================
    IMPORT FDMI (feuille de match Footclubs)
    ========================================================= */
-document.getElementById('import-fdmi').addEventListener('change', async e => {
+document.getElementById('import-fdmi')?.addEventListener('change', async e => {
   const file = e.target.files[0];
   if (!file) return;
   try {
@@ -623,7 +623,7 @@ document.getElementById('import-fdmi').addEventListener('change', async e => {
 });
 
 /* ---------- Import FDMI PDF ---------- */
-document.getElementById('import-fdmi-pdf').addEventListener('change', async e => {
+document.getElementById('import-fdmi-pdf')?.addEventListener('change', async e => {
   const file = e.target.files[0];
   if (!file) return;
   if (!window.pdfjsLib) {
@@ -1299,6 +1299,213 @@ function openFdmiPreviewModal(fdmi) {
     });
     saveState(); closeModal(); renderSquad();
     alert(`✅ ${added} performance(s) ajoutée(s).`);
+  });
+}
+
+/* =========================================================
+   IMPORT EXCEL (effectif saison complète)
+   Format attendu (feuille unique) :
+     Ligne 1 : Date | (vides) | date match 1 | ... | date match N
+     Ligne 2 : Adversaires
+     Ligne 3 : Lieu (Domicile/Extérieur)
+     Ligne 4 : Résultat (Victoire/Défaite/Nul)
+     Ligne 5 : Points
+     Ligne 6 : Score
+     Ligne 7 : Différence de buts
+     Ligne 8 : En-têtes colonnes
+                N° | Prénom | Nom | Poste | Âge | Pied
+                puis par match : Poste | Temps de jeu | But | P.D. | _ | _ | Note
+     Ligne 9+ : Joueurs
+   On ne retient que les statuts T (titulaire) et R (remplaçant entré).
+   ========================================================= */
+const EXCEL_POSITION_MAP = {
+  'gardien': 'Gardien',
+  'central': 'Défenseur central',
+  'défenseur central': 'Défenseur central',
+  'defenseur central': 'Défenseur central',
+  'latéral': 'Latéral',
+  'lateral': 'Latéral',
+  'milieu': 'Milieu central',
+  'milieu défensif': 'Milieu défensif',
+  'milieu defensif': 'Milieu défensif',
+  'milieu central': 'Milieu central',
+  'milieu offensif': 'Milieu offensif',
+  'ailier': 'Ailier',
+  'attaquant': 'Attaquant'
+};
+
+function normalizeExcelPosition(raw) {
+  if (!raw) return '';
+  const k = String(raw).trim().toLowerCase();
+  return EXCEL_POSITION_MAP[k] || String(raw).trim();
+}
+
+function excelDateToIso(v) {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === 'number') {
+    const d = XLSX.SSF.parse_date_code(v);
+    if (!d) return '';
+    const mm = String(d.m).padStart(2, '0');
+    const dd = String(d.d).padStart(2, '0');
+    return `${d.y}-${mm}-${dd}`;
+  }
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    const yyyy = m[3].length === 2 ? '20' + m[3] : m[3];
+    return `${yyyy}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  }
+  return s;
+}
+
+function parseSquadExcelGrid(grid) {
+  if (!grid || grid.length < 9) throw new Error('Feuille trop courte : au moins 9 lignes attendues.');
+
+  const datesRow = grid[0] || [];
+  const opponentsRow = grid[1] || [];
+  const venuesRow = grid[2] || [];
+  const resultsRow = grid[3] || [];
+  const headerRow = grid[7] || [];
+
+  // Repère l'index de la 1re colonne "Poste" qui suit "Pied" (après les 6 colonnes d'info joueur)
+  let firstMatchCol = -1;
+  for (let c = 6; c < headerRow.length; c++) {
+    const v = String(headerRow[c] || '').trim().toLowerCase();
+    if (v === 'poste') { firstMatchCol = c; break; }
+  }
+  if (firstMatchCol === -1) firstMatchCol = 6;
+
+  // Construit la liste des matchs (bloc de 7 colonnes par match)
+  const matches = [];
+  for (let c = firstMatchCol; c < headerRow.length; c += 7) {
+    const rawDate = datesRow[c];
+    if (!rawDate) continue;
+    matches.push({
+      col: c,
+      date: excelDateToIso(rawDate),
+      opponent: String(opponentsRow[c] || '').trim(),
+      venue: String(venuesRow[c] || '').trim(),
+      result: String(resultsRow[c] || '').trim()
+    });
+  }
+
+  // Parcourt les joueurs à partir de la ligne 9 (index 8)
+  const players = [];
+  for (let r = 8; r < grid.length; r++) {
+    const row = grid[r] || [];
+    const number = row[0];
+    const firstName = String(row[1] || '').trim();
+    const lastName = String(row[2] || '').trim();
+    if (!firstName && !lastName) continue;
+    const position = normalizeExcelPosition(row[3]);
+    const age = row[4] ? Number(row[4]) || '' : '';
+    const foot = String(row[5] || '').trim();
+
+    const playerMatches = [];
+    for (const m of matches) {
+      const status = String(row[m.col] || '').trim().toUpperCase();
+      if (status !== 'T' && status !== 'R') continue;
+      const minutes = Number(row[m.col + 1]) || 0;
+      const goals = Number(row[m.col + 2]) || 0;
+      const assists = Number(row[m.col + 3]) || 0;
+      playerMatches.push({
+        id: uid(),
+        date: m.date,
+        opponent: m.opponent,
+        venue: m.venue,
+        result: m.result,
+        starter: status === 'T',
+        minutes, goals, assists,
+        yellowCards: 0,
+        redCards: 0,
+        notes: 'Import Excel'
+      });
+    }
+
+    players.push({
+      id: uid(),
+      number: number != null && number !== '' ? String(number) : '',
+      firstName, lastName, position,
+      age, foot, notes: '',
+      matches: playerMatches
+    });
+  }
+
+  return { matches, players };
+}
+
+async function readSpreadsheetFile(file) {
+  if (!window.XLSX) throw new Error('Librairie XLSX non chargée (vérifiez votre connexion).');
+  const buffer = await file.arrayBuffer();
+  const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
+  const sheetName = wb.SheetNames[0];
+  const sheet = wb.Sheets[sheetName];
+  return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+}
+
+document.getElementById('import-squad-xlsx')?.addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const grid = await readSpreadsheetFile(file);
+    const parsed = parseSquadExcelGrid(grid);
+    openSquadExcelPreview(parsed);
+  } catch (err) {
+    console.error(err);
+    alert('Erreur à l\'import Excel : ' + err.message);
+  }
+  e.target.value = '';
+});
+
+function openSquadExcelPreview({ matches, players }) {
+  const activePlayers = players.filter(p => p.matches.length > 0);
+  const rowsHtml = players.map(p => {
+    const t = totals(p.matches);
+    return `
+      <tr>
+        <td class="num">${escapeHtml(p.number)}</td>
+        <td>${escapeHtml(p.firstName)} ${escapeHtml(p.lastName)}</td>
+        <td>${escapeHtml(p.position)}</td>
+        <td class="num">${t.matches}</td>
+        <td class="num">${t.starts}</td>
+        <td class="num">${t.subs}</td>
+        <td class="num">${t.minutes}'</td>
+        <td class="num">${t.goals}</td>
+        <td class="num">${t.assists}</td>
+      </tr>
+    `;
+  }).join('');
+
+  openModal(`
+    <h3>Aperçu de l'import Excel</h3>
+    <div class="card-sub">${matches.length} match(s) détectés — ${players.length} joueur(s), dont ${activePlayers.length} avec au moins une apparition (T ou R).</div>
+    <div style="max-height:55vh; overflow:auto; margin-top:12px;">
+      <table class="matches-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Joueur</th><th>Poste</th>
+            <th>M</th><th>T</th><th>R</th>
+            <th>Min</th><th>B</th><th>PD</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Annuler</button>
+      <button type="button" class="btn primary" id="excel-import-confirm">Remplacer l'effectif (${players.length} joueurs)</button>
+    </div>
+  `);
+
+  document.getElementById('excel-import-confirm').addEventListener('click', () => {
+    if (!confirm('Cet import remplace intégralement l\'effectif actuel et son historique. Continuer ?')) return;
+    state.squad = players;
+    saveState();
+    closeModal();
+    renderSquad();
+    renderProjection();
+    alert(`✅ ${players.length} joueurs importés (${activePlayers.length} avec apparitions).`);
   });
 }
 
