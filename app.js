@@ -1462,8 +1462,13 @@ function parseSquadExcelGrid(grid) {
   }
 
   // Diagnostic console pour debug
-  console.log('[Excel import] headerRowIdx=', headerRowIdx, 'firstMatchCol=', firstMatchCol, 'matches=', matches.length, 'players=', players.length);
-  console.log('[Excel import] Premiers matchs:', matches.slice(0, 3));
+  console.log('[Excel import] headerRowIdx=', headerRowIdx, 'firstMatchCol=', firstMatchCol);
+  console.log('[Excel import] matches=', matches.length, 'players=', players.length);
+  console.log('[Excel import] grid[0] (dates row):', JSON.stringify((grid[0]||[]).slice(0,15)));
+  console.log('[Excel import] grid[1] (adv row):', JSON.stringify((grid[1]||[]).slice(0,15)));
+  console.log('[Excel import] headerRow cols 0-8:', JSON.stringify((grid[headerRowIdx]||[]).slice(0,9)));
+  console.log('[Excel import] 1er joueur cols 0-9:', JSON.stringify((grid[headerRowIdx+1]||[]).slice(0,9)));
+  console.log('[Excel import] allDateCells found:', JSON.stringify(allDateCells.slice(0,5)));
 
   return { matches, players };
 }
