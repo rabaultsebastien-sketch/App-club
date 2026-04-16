@@ -13,6 +13,8 @@ const parserFns = [
   'parseDoubleColumnLine',
   'parsePlayerTokens',
   'parseGoalLine',
+  'parseRemplacementRows',
+  'parseDisciplineRows',
   'normalizeName'
 ];
 // Extrait chaque fonction via regex (brut mais suffisant pour le test)
@@ -107,3 +109,27 @@ console.log(`   BAUDRY didNotPlay : ${baudry?.didNotPlay} (attendu true)`);
 
 const luyambula = result.players.find(p => p.lastName.includes('LUYAMBULA'));
 console.log(`   LUYAMBULA BIWA : ${luyambula?.lastName} (attendu "LUYAMBULA BIWA")`);
+
+/* ------------------------------------------------------------------ */
+/* Test 2 : parseur REMPLACEMENT avec colonnes (simule l'extraction PDF) */
+/* ------------------------------------------------------------------ */
+console.log('\n🔁 Test REMPLACEMENT (colonnes gauche/droite) :');
+const rowsWithCols = lines.map(l => ({ text: l, leftText: '', rightText: '' }));
+// Injecte le leftText/rightText pour la ligne REMPLACEMENT (idx 41)
+const remIdx = lines.findIndex(l => /25 - BA Papa/.test(l));
+if (remIdx !== -1) {
+  rowsWithCols[remIdx] = {
+    text: lines[remIdx],
+    leftText: "10 - KHOUS Guillaume 2308078460 25 - BA Papa Ibnou 2548593537 75' + 0'",
+    rightText: "18 - DA SILVA Flavio 2544284142 20 - NTUMI Matheo 2547582871 64' + 0'"
+  };
+}
+const result2 = sandbox.tryParseFdmiPdf(rowsWithCols);
+const khous = result2.players.find(p => p.lastName === 'KHOUS' && p.team === 'home');
+const ba = result2.players.find(p => p.lastName === 'BA' && p.team === 'home');
+const daSilva = result2.players.find(p => p.lastName === 'DA SILVA' && p.team === 'away');
+const ntumi = result2.players.find(p => p.lastName === 'NTUMI' && p.team === 'away');
+console.log(`   KHOUS (titulaire sorti à 75') : ${khous?.minutes}' (attendu 75)`);
+console.log(`   BA (entré à 75') : ${ba?.minutes}' (attendu 15)`);
+console.log(`   DA SILVA (titulaire sorti à 64') : ${daSilva?.minutes}' (attendu 64)`);
+console.log(`   NTUMI (entré à 64') : ${ntumi?.minutes}' (attendu 26)`);

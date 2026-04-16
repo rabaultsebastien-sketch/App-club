@@ -37,9 +37,11 @@ function totals(matches = []) {
     acc.minutes += Number(m.minutes) || 0;
     acc.goals += Number(m.goals) || 0;
     acc.assists += Number(m.assists) || 0;
+    acc.yellowCards += Number(m.yellowCards) || 0;
+    acc.redCards += Number(m.redCards) || 0;
     if (m.starter) acc.starts += 1; else acc.subs += 1;
     return acc;
-  }, { matches: 0, minutes: 0, goals: 0, assists: 0, starts: 0, subs: 0 });
+  }, { matches: 0, minutes: 0, goals: 0, assists: 0, yellowCards: 0, redCards: 0, starts: 0, subs: 0 });
 }
 
 function statusClass(s) {
@@ -111,6 +113,10 @@ function renderSquad() {
         <div class="stats" style="grid-template-columns: repeat(2, 1fr);">
           <div class="stat-box"><div class="n">${t.starts}</div><div class="l">Titulaire</div></div>
           <div class="stat-box"><div class="n">${t.subs}</div><div class="l">Remplaçant</div></div>
+        </div>
+        <div class="stats" style="grid-template-columns: repeat(2, 1fr);">
+          <div class="stat-box"><div class="n">${t.yellowCards}</div><div class="l">🟨 Jaunes</div></div>
+          <div class="stat-box"><div class="n">${t.redCards}</div><div class="l">🟥 Rouges</div></div>
         </div>
         <div class="card-actions">
           <button class="btn small primary" data-act="match" data-id="${p.id}">+ Match</button>
@@ -200,6 +206,10 @@ function openMatchModal(playerId) {
         <label>Buts<input type="number" name="goals" min="0" value="0" /></label>
         <label>Passes D<input type="number" name="assists" min="0" value="0" /></label>
       </div>
+      <div class="form-row">
+        <label>🟨 Cartons jaunes<input type="number" name="yellowCards" min="0" max="2" value="0" /></label>
+        <label>🟥 Cartons rouges<input type="number" name="redCards" min="0" max="1" value="0" /></label>
+      </div>
       <div class="form-row full">
         <label>Note / commentaire<textarea name="notes"></textarea></label>
       </div>
@@ -221,6 +231,8 @@ function openMatchModal(playerId) {
       minutes: Number(data.minutes) || 0,
       goals: Number(data.goals) || 0,
       assists: Number(data.assists) || 0,
+      yellowCards: Number(data.yellowCards) || 0,
+      redCards: Number(data.redCards) || 0,
       notes: data.notes
     });
     saveState(); closeModal(); renderSquad();
@@ -240,6 +252,8 @@ function openPlayerDetails(playerId) {
       <td class="num">${m.minutes}'</td>
       <td class="num">${m.goals}</td>
       <td class="num">${m.assists}</td>
+      <td class="num">${m.yellowCards || 0}</td>
+      <td class="num">${m.redCards || 0}</td>
       <td><button class="btn small ghost" data-del-match="${m.id}">✕</button></td>
     </tr>
   `).join('');
@@ -252,14 +266,16 @@ function openPlayerDetails(playerId) {
       <div class="stat-box"><div class="n">${t.subs}</div><div class="l">Remplaçant</div></div>
       <div class="stat-box"><div class="n">${t.minutes}'</div><div class="l">Minutes</div></div>
     </div>
-    <div class="stats" style="grid-template-columns: repeat(2,1fr); margin-top:8px;">
+    <div class="stats" style="grid-template-columns: repeat(4,1fr); margin-top:8px;">
       <div class="stat-box"><div class="n">${t.goals}</div><div class="l">Buts</div></div>
       <div class="stat-box"><div class="n">${t.assists}</div><div class="l">Passes D</div></div>
+      <div class="stat-box"><div class="n">${t.yellowCards}</div><div class="l">🟨 Jaunes</div></div>
+      <div class="stat-box"><div class="n">${t.redCards}</div><div class="l">🟥 Rouges</div></div>
     </div>
     <div class="matches-section">
       <h4>Historique des matchs</h4>
       ${rows ? `<table class="matches-table">
-        <thead><tr><th>Date</th><th>Adv.</th><th>Rôle</th><th>Min</th><th>B</th><th>PD</th><th></th></tr></thead>
+        <thead><tr><th>Date</th><th>Adv.</th><th>Rôle</th><th>Min</th><th>B</th><th>PD</th><th>🟨</th><th>🟥</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>` : `<div class="empty">Aucun match enregistré.</div>`}
     </div>
@@ -618,24 +634,30 @@ document.getElementById('import-fdmi-pdf').addEventListener('change', async e =>
     const pages = [];
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1 });
+      const midX = viewport.width / 2;
       const content = await page.getTextContent();
-      // Groupe les items par ligne (même coordonnée Y, à 2 pixels près)
-      const lines = {};
+      // Groupe les items par ligne (même coordonnée Y, à 3 pixels près)
+      const buckets = {};
       content.items.forEach(it => {
         const y = Math.round(it.transform[5]);
-        const key = Math.floor(y / 3) * 3; // bucket 3px pour tolérer petites variations
-        if (!lines[key]) lines[key] = [];
-        lines[key].push({ x: it.transform[4], text: it.str });
+        const key = Math.floor(y / 3) * 3;
+        if (!buckets[key]) buckets[key] = [];
+        buckets[key].push({ x: it.transform[4], text: it.str });
       });
-      const sorted = Object.keys(lines).map(Number).sort((a, b) => b - a);
-      const pageLines = sorted.map(y =>
-        lines[y].sort((a, b) => a.x - b.x).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim()
-      ).filter(Boolean);
-      pages.push(pageLines);
+      const sorted = Object.keys(buckets).map(Number).sort((a, b) => b - a);
+      const pageRows = sorted.map(y => {
+        const items = buckets[y].sort((a, b) => a.x - b.x);
+        const text = items.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+        const leftText = items.filter(i => i.x < midX).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+        const rightText = items.filter(i => i.x >= midX).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+        return { text, leftText, rightText };
+      }).filter(r => r.text);
+      pages.push(pageRows);
     }
-    const allLines = pages.flat();
-    const parsed = tryParseFdmiPdf(allLines);
-    openPdfFdmiModal(allLines, parsed);
+    const allRows = pages.flat();
+    const parsed = tryParseFdmiPdf(allRows);
+    openPdfFdmiModal(allRows.map(r => r.text), parsed);
   } catch (err) {
     console.error(err);
     alert('Erreur à la lecture du PDF : ' + err.message);
@@ -653,7 +675,13 @@ document.getElementById('import-fdmi-pdf').addEventListener('change', async e =>
    Chaque ligne texte contient à la fois l'info domicile ET extérieur,
    séparées par les numéros de licence (9 ou 10 chiffres).
 */
-function tryParseFdmiPdf(lines) {
+function tryParseFdmiPdf(input) {
+  // Accepte soit un tableau de chaînes (compat tests), soit un tableau de {text, leftText, rightText}
+  const rows = input.map(r => typeof r === 'string'
+    ? { text: r, leftText: '', rightText: '' }
+    : r);
+  const lines = rows.map(r => r.text);
+
   const sections = findFdmiSections(lines);
   if (!sections.COMPOSITION) return null;
 
@@ -723,18 +751,26 @@ function tryParseFdmiPdf(lines) {
     }
   }
 
-  // Minutes : défauts (éditables dans l'aperçu)
+  // Minutes : défauts (titulaire=90, sub=0, non entré=0). Seront affinées par REMPLACEMENT.
   players.forEach(p => {
-    if (p.didNotPlay) {
-      p.minutes = 0;
-    } else if (p.starter) {
-      p.minutes = 90;
-    } else {
-      p.minutes = 0; // sub qui a joué : l'utilisateur ajuste
-    }
+    p.minutes = p.didNotPlay ? 0 : (p.starter ? 90 : 0);
     p.goals = p.goals || 0;
     p.assists = p.assists || 0;
+    p.yellowCards = 0;
+    p.redCards = 0;
   });
+
+  // Remplacements : calcule les minutes réelles (titulaire sorti / sub entré).
+  if (sections.REMPLACEMENT != null) {
+    const remEnd = findNextSection(lines, sections.REMPLACEMENT + 1);
+    parseRemplacementRows(rows, sections.REMPLACEMENT + 1, remEnd, players);
+  }
+
+  // Discipline : cartons jaunes / rouges.
+  if (sections.DISCIPLINE != null) {
+    const dispEnd = findNextSection(lines, sections.DISCIPLINE + 1);
+    parseDisciplineRows(rows, sections.DISCIPLINE + 1, dispEnd, players);
+  }
 
   if (players.length < 5) return null;
 
@@ -860,6 +896,119 @@ function parseGoalLine(line) {
     assistFirst: m[9] ? m[9].trim() : null,
     minute: Number(m[10])
   };
+}
+
+/* Parse les événements de substitution dans la section REMPLACEMENT.
+   Format par colonne : "<#out> - <OUT NAME> <licence> <#in> - <IN NAME> <licence> NN' + MM'"
+   On lit leftText (domicile) et rightText (extérieur) séparément quand possible.
+   Met à jour les minutes des joueurs impactés.
+*/
+function parseRemplacementRows(rows, fromIdx, toIdx, players) {
+  // Indexe les joueurs par équipe + numéro pour recherche rapide.
+  const byTeamNum = {};
+  players.forEach(p => {
+    if (p.team && p.number) byTeamNum[p.team + '#' + p.number] = p;
+  });
+
+  // Table in/out par joueur pour recalculer le temps de jeu à la fin.
+  const inMin = new Map();   // player -> minute d'entrée
+  const outMin = new Map();  // player -> minute de sortie
+
+  function applyColumnEvents(colText, team) {
+    if (!colText) return;
+    // Récupère minutes (peut y avoir plusieurs événements sur une même ligne)
+    const eventRe = /(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]*?)\s+(?:[A-ZÀ-Ö][a-zà-öø-ÿ]+(?:\s+[A-ZÀ-Ö][a-zà-öø-ÿ]+)*\s+)?(\d{9,10})?/g;
+    const minuteRe = /(\d{1,3})'\s*\+\s*\d+'/g;
+
+    // Collecte tous les numéros de joueurs mentionnés dans l'ordre
+    const playerRefs = [];
+    const simpleRefRe = /(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]+?)(?=\s+(?:[A-ZÀ-Ö][a-zà-öø-ÿ]|\d{9,10}|\d{1,3}'|$))/g;
+    let rm;
+    while ((rm = simpleRefRe.exec(colText)) !== null) {
+      playerRefs.push({ number: rm[1], last: rm[2].trim() });
+    }
+
+    const minutes = [];
+    let mm;
+    while ((mm = minuteRe.exec(colText)) !== null) {
+      minutes.push(Number(mm[1]));
+    }
+    if (minutes.length === 0 || playerRefs.length < 2) return;
+
+    // Un événement = paire (out, in) + minute. On apparie dans l'ordre.
+    for (let i = 0; i < minutes.length && i * 2 + 1 < playerRefs.length; i++) {
+      const outRef = playerRefs[i * 2];
+      const inRef = playerRefs[i * 2 + 1];
+      const minute = minutes[i];
+      const outP = byTeamNum[team + '#' + outRef.number];
+      const inP = byTeamNum[team + '#' + inRef.number];
+      if (outP) outMin.set(outP, minute);
+      if (inP) inMin.set(inP, minute);
+    }
+  }
+
+  for (let i = fromIdx; i < toIdx; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    if (row.leftText || row.rightText) {
+      applyColumnEvents(row.leftText, 'home');
+      applyColumnEvents(row.rightText, 'away');
+    } else {
+      // Fallback : pas d'info colonne (ex. tests en texte brut) — on tente les deux équipes.
+      applyColumnEvents(row.text, 'home');
+      applyColumnEvents(row.text, 'away');
+    }
+  }
+
+  // Applique : titulaire sorti => minutes = outMin, sub entré => minutes = 90 - inMin.
+  const FULL = 90;
+  players.forEach(p => {
+    const i = inMin.get(p);
+    const o = outMin.get(p);
+    if (p.starter) {
+      if (o != null) p.minutes = o;
+    } else if (!p.didNotPlay) {
+      if (i != null) {
+        p.minutes = o != null ? Math.max(0, o - i) : Math.max(0, FULL - i);
+      }
+    }
+  });
+}
+
+/* Parse la section DISCIPLINE.
+   Format observé : "<Equipe> <licence> <#> - <NOM> <Prénom> <motif> <couleur?> NN' + MM'"
+   Couleur par défaut : jaune. Rouge détectée via mots-clés (exclusion / 2ème avertissement).
+*/
+function parseDisciplineRows(rows, fromIdx, toIdx, players) {
+  const lines = [];
+  for (let i = fromIdx; i < toIdx; i++) {
+    if (rows[i]) lines.push(rows[i].text);
+  }
+  const refRe = /(\d{9,10})\s+(\d{1,2})\s*-\s*([A-ZÀ-Ö][A-ZÀ-Ö\-'\s]*?)\s+[A-ZÀ-Ö][a-zà-öø-ÿ]/g;
+  const redRe = /\b(rouge|exclusion|2\s*[eèé]me?\s+avertissement|second\s+avertissement)\b/i;
+
+  for (const line of lines) {
+    // Passe les en-têtes du tableau
+    if (/^Equipe\b/i.test(line) || /^[A-ZÀ-Ö\s]+$/.test(line.trim())) continue;
+    let rm;
+    // Reset regex state pour chaque ligne
+    refRe.lastIndex = 0;
+    while ((rm = refRe.exec(line)) !== null) {
+      const number = rm[2];
+      const last = rm[3].trim();
+      const isRed = redRe.test(line);
+      // Trouve le joueur : par numéro + nom normalisé
+      const nLast = normalizeName(last);
+      const target = players.find(p =>
+        String(p.number) === String(number) &&
+        (normalizeName(p.lastName) === nLast || normalizeName(p.lastName).includes(nLast))
+      );
+      if (target) {
+        if (isRed) target.redCards = (target.redCards || 0) + 1;
+        else target.yellowCards = (target.yellowCards || 0) + 1;
+      }
+    }
+  }
 }
 
 function openPdfFdmiModal(rawLines, parsed) {
@@ -990,6 +1139,8 @@ function openFdmiPreviewModal(fdmi) {
           <th class="num">Min</th>
           <th class="num">B</th>
           <th class="num">PD</th>
+          <th class="num" title="Carton jaune">🟨</th>
+          <th class="num" title="Carton rouge">🟥</th>
         </tr>
       </thead>
       <tbody>
@@ -1002,6 +1153,8 @@ function openFdmiPreviewModal(fdmi) {
             <td class="num"><input type="number" data-min="${r.index}" value="${r.fp.minutes || 0}" min="0" max="120" style="width:50px; background:var(--bg-card); border:1px solid var(--border); color:var(--text); padding:2px 4px; border-radius:4px;"></td>
             <td class="num">${r.fp.goals || 0}</td>
             <td class="num">${r.fp.assists || 0}</td>
+            <td class="num"><input type="number" data-yc="${r.index}" value="${r.fp.yellowCards || 0}" min="0" max="2" style="width:38px; background:var(--bg-card); border:1px solid var(--border); color:var(--text); padding:2px 4px; border-radius:4px;"></td>
+            <td class="num"><input type="number" data-rc="${r.index}" value="${r.fp.redCards || 0}" min="0" max="1" style="width:38px; background:var(--bg-card); border:1px solid var(--border); color:var(--text); padding:2px 4px; border-radius:4px;"></td>
           </tr>
         `).join('')}
       </tbody>
@@ -1019,23 +1172,35 @@ function openFdmiPreviewModal(fdmi) {
       [...document.querySelectorAll('input[type="checkbox"][data-i]:checked')]
         .map(cb => Number(cb.dataset.i))
     );
-    // Récupère les minutes éditées
-    const editedMinutes = {};
+    // Récupère les champs éditables
+    const edited = {};
     document.querySelectorAll('input[type="number"][data-min]').forEach(inp => {
-      editedMinutes[Number(inp.dataset.min)] = Number(inp.value) || 0;
+      edited[inp.dataset.min] = edited[inp.dataset.min] || {};
+      edited[inp.dataset.min].minutes = Number(inp.value) || 0;
+    });
+    document.querySelectorAll('input[type="number"][data-yc]').forEach(inp => {
+      edited[inp.dataset.yc] = edited[inp.dataset.yc] || {};
+      edited[inp.dataset.yc].yellowCards = Number(inp.value) || 0;
+    });
+    document.querySelectorAll('input[type="number"][data-rc]').forEach(inp => {
+      edited[inp.dataset.rc] = edited[inp.dataset.rc] || {};
+      edited[inp.dataset.rc].redCards = Number(inp.value) || 0;
     });
     let added = 0;
     rows.forEach(r => {
       if (!included.has(r.index) || !r.squadP) return;
+      const e = edited[r.index] || {};
       r.squadP.matches = r.squadP.matches || [];
       r.squadP.matches.push({
         id: uid(),
         date,
         opponent,
         starter: !!r.fp.starter,
-        minutes: editedMinutes[r.index] != null ? editedMinutes[r.index] : (Number(r.fp.minutes) || 0),
+        minutes: e.minutes != null ? e.minutes : (Number(r.fp.minutes) || 0),
         goals: Number(r.fp.goals) || 0,
         assists: Number(r.fp.assists) || 0,
+        yellowCards: e.yellowCards != null ? e.yellowCards : (Number(r.fp.yellowCards) || 0),
+        redCards: e.redCards != null ? e.redCards : (Number(r.fp.redCards) || 0),
         notes: 'Import FDMI'
       });
       added++;
