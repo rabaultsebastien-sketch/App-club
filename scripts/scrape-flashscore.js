@@ -58,6 +58,7 @@ async function main() {
     headless: false,
     userDataDir: PROFILE_DIR,
     defaultViewport: null,
+    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     args: ['--start-maximized', '--no-sandbox', '--disable-blink-features=AutomationControlled']
   });
 
