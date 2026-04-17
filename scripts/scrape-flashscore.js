@@ -636,6 +636,7 @@ function buildPlayerList(lineups, events, ourSide) {
   const players = lineups.map(p => ({
     name: p.name,
     number: p.number,
+    team: ourSide,
     starter: p.starter !== false,
     minutes: p.starter !== false ? 90 : 0,
     goals: 0,
