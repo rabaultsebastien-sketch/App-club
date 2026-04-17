@@ -395,68 +395,41 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     const evts = [];
     const seen = new Set();
     const text = document.body.innerText || '';
-
-    // Parse the full page text for FFF event patterns:
-    // "But pour TEAM inscrit par PLAYER"
-    // "Carton jaune pour PLAYER (TEAM)"
-    // "Remplacement pour TEAM : PLAYER_IN remplace PLAYER_OUT"
-    // "Changement pour TEAM"
     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5);
 
+    // FFF concatenates without spaces: "Avertissement pour CONCARNEAU USFLAVIO DA SILVA est averti"
+    // Parse by keying on ACTION words: "est averti", "inscrit par", "remplace"
     for (const line of lines) {
       if (seen.has(line)) continue;
-
-      // Extract minute from line if present (e.g. "63'" or "63e")
       const minMatch = line.match(/(\d+)[''′e]\s*/);
       const minute = minMatch ? parseInt(minMatch[1]) : 0;
 
-      // But (goal)
-      if (/but\s+pour/i.test(line)) {
+      // "...inscrit par PLAYER_NAME" → goal
+      if (/inscrit\s+par/i.test(line)) {
         seen.add(line);
-        const m = line.match(/but\s+pour\s+(.+?)(?:inscrit|marqu[ée])\s+par\s+(.+)/i);
-        evts.push({ type: 'goal', team: m ? m[1].trim() : '', player: m ? m[2].trim() : '', minute, text: line });
+        const m = line.match(/inscrit\s+par\s+(.+)/i);
+        const tm = line.match(/but\s+pour\s+(.+?)(?:inscrit|marqu)/i);
+        evts.push({ type: 'goal', player: m ? m[1].trim() : '', team: tm ? tm[1].trim() : '', minute, text: line });
       }
-      // Carton jaune
-      else if (/carton\s+jaune/i.test(line)) {
+      // "...PLAYER_NAME est averti" → yellow card
+      else if (/est averti/i.test(line)) {
         seen.add(line);
-        const m = line.match(/carton\s+jaune\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
-        evts.push({ type: 'yellowCard', player: m ? m[1].trim() : '', team: m ? (m[2] || '').trim() : '', minute, text: line });
+        const m = line.match(/([A-ZÀ-Ý][A-ZÀ-Ý\s\-']{2,40}?)\s*est averti/i);
+        const tm = line.match(/avertissement\s+pour\s+(.+?)(?=[A-Z]{2,}[a-z]|[A-Z]{2,}\s+est)/i);
+        evts.push({ type: 'yellowCard', player: m ? m[1].trim() : '', team: tm ? tm[1].trim() : '', minute, text: line });
       }
-      // Carton rouge
-      else if (/carton\s+rouge/i.test(line)) {
+      // "...est exclu" or "carton rouge" → red card
+      else if (/est exclu|carton\s+rouge/i.test(line)) {
         seen.add(line);
-        const m = line.match(/carton\s+rouge\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
-        evts.push({ type: 'redCard', player: m ? m[1].trim() : '', team: m ? (m[2] || '').trim() : '', minute, text: line });
+        const m = line.match(/([A-ZÀ-Ý][A-ZÀ-Ý\s\-']{2,40}?)\s*est exclu/i);
+        evts.push({ type: 'redCard', player: m ? m[1].trim() : '', team: '', minute, text: line });
       }
-      // Remplacement
-      else if (/remplacement|changement/i.test(line) && /remplace/i.test(line)) {
+      // "...PLAYER_IN remplace PLAYER_OUT" → substitution
+      else if (/remplace/i.test(line)) {
         seen.add(line);
-        const m = line.match(/(.+?)\s+remplace\s+(.+)/i);
+        const m = line.match(/([A-ZÀ-Ý][A-ZÀ-Ý\s\-']{2,40}?)\s*remplace\s+(.+)/i);
         evts.push({ type: 'substitution', playerIn: m ? m[1].trim() : '', playerOut: m ? m[2].trim() : '', minute, text: line });
       }
-      // Avertissement
-      else if (/avertissement/i.test(line)) {
-        seen.add(line);
-        const m = line.match(/avertissement\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
-        evts.push({ type: 'yellowCard', player: m ? m[1].trim() : '', team: m ? (m[2] || '').trim() : '', minute, text: line });
-      }
-    }
-
-    // Also look for event elements in the DOM
-    const eventSelectors = [
-      '[class*="event"]', '[class*="Event"]', '[class*="timeline"]',
-      '[class*="incident"]', '[class*="action"]', '[class*="Action"]'
-    ];
-    for (const sel of eventSelectors) {
-      document.querySelectorAll(sel).forEach(el => {
-        const t = el.textContent.trim();
-        if (t.length > 5 && t.length < 300 && !seen.has(t)) {
-          if (/but|carton|remplac|avertiss|changement/i.test(t)) {
-            seen.add(t);
-            evts.push({ type: 'raw', text: t, player: '', team: '' });
-          }
-        }
-      });
     }
 
     return evts;
