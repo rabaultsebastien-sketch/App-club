@@ -23,6 +23,7 @@ const DEBUG_DIR = path.join(ROOT, '.cache', 'debug');
 const RESULTS_URL = 'https://www.flashscore.fr/equipe/orleans/AqswAEFD/resultats/';
 const TEAM_KEYWORDS = ['orléans', 'orleans'];
 const MIN_MATCHDAY = 30;
+const TEST_MODE = process.argv.includes('--test');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -146,10 +147,11 @@ async function main() {
   // Take matchdays 30-34 = last 5 of the season.
   // We take a reasonable slice from the most recent matches.
   const totalMatchdays = 34;
-  const wantedCount = totalMatchdays - MIN_MATCHDAY + 1; // 5
+  const wantedCount = TEST_MODE ? 1 : totalMatchdays - MIN_MATCHDAY + 1;
   const toProcess = pool.slice(0, wantedCount);
 
-  console.log(`\n🎯 ${toProcess.length} match(s) à traiter (journées ${MIN_MATCHDAY}–${totalMatchdays}) :`);
+  if (TEST_MODE) console.log('\n🧪 MODE TEST — 1 seul match');
+  console.log(`\n🎯 ${toProcess.length} match(s) à traiter :`);
   toProcess.forEach((m, i) => {
     console.log(`  ${i + 1}. ${m.time} ${m.home} ${m.scoreHome}-${m.scoreAway} ${m.away}`);
   });
@@ -173,6 +175,33 @@ async function main() {
         const c = detail.players.reduce((s, p) => s + p.yellowCards + p.redCards, 0);
         const a = detail.players.reduce((s, p) => s + p.assists, 0);
         console.log(`   ✅ ${detail.players.length} joueurs | ${g} but(s), ${a} passe(s) D, ${c} carton(s)`);
+        if (TEST_MODE) {
+          console.log('\n   ┌─────────────────────────────────────────────────────────────┐');
+          console.log('   │  DÉTAIL JOUEURS ORLÉANS                                    │');
+          console.log('   ├────┬──────────────────────┬──────┬──────┬────┬────┬─────────┤');
+          console.log('   │ #  │ Nom                  │ Titu │ Min  │ B  │ PD │ Cartons │');
+          console.log('   ├────┼──────────────────────┼──────┼──────┼────┼────┼─────────┤');
+          for (const p of detail.players) {
+            const num = (p.number || '-').toString().padStart(2);
+            const name = (p.name || '').padEnd(20).slice(0, 20);
+            const titu = p.starter ? 'OUI' : 'NON';
+            const min = String(p.minutes).padStart(4);
+            const buts = String(p.goals).padStart(2);
+            const pd = String(p.assists).padStart(2);
+            const cj = p.yellowCards ? `${p.yellowCards}J` : '  ';
+            const cr = p.redCards ? `${p.redCards}R` : '  ';
+            const cartons = `${cj} ${cr}`.trim() || '-';
+            console.log(`   │ ${num} │ ${name} │ ${titu}  │ ${min} │ ${buts} │ ${pd} │ ${cartons.padEnd(7)} │`);
+          }
+          console.log('   └────┴──────────────────────┴──────┴──────┴────┴────┴─────────┘');
+          if (detail.rawEvents && detail.rawEvents.length > 0) {
+            console.log('\n   ÉVÉNEMENTS DU MATCH :');
+            for (const e of detail.rawEvents) {
+              const icon = e.type === 'goal' ? '⚽' : e.type === 'yellowCard' ? '🟡' : e.type === 'redCard' ? '🔴' : e.type === 'substitution' ? '🔄' : '❓';
+              console.log(`   ${icon} ${e.minute}' ${e.name} ${e.assistName ? `(${e.assistName})` : ''} [${e.team}]`);
+            }
+          }
+        }
       } else {
         console.log('   ⚠️ Pas de données trouvées');
       }
