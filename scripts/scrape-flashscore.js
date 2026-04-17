@@ -56,7 +56,6 @@ async function main() {
   console.log('\n\u{1F680} Lancement de Chrome...');
   const browser = await puppeteer.launch({
     headless: false,
-    userDataDir: PROFILE_DIR,
     defaultViewport: null,
     executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     args: ['--start-maximized', '--no-sandbox', '--disable-blink-features=AutomationControlled']
