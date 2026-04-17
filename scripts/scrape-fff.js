@@ -367,6 +367,20 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   await clickTab(page, ['le match']);
   await sleep(2000);
 
+  // Click "Voir plus" to expand all events
+  try {
+    await page.evaluate(() => {
+      const btns = document.querySelectorAll('button, a, [class*="more"], [class*="More"], [class*="voir"], [class*="Voir"]');
+      for (const btn of btns) {
+        const t = btn.textContent.trim().toLowerCase();
+        if (t.includes('voir plus') || t.includes('voir tout') || t.includes('afficher')) {
+          btn.click();
+        }
+      }
+    });
+    await sleep(2000);
+  } catch (_) {}
+
   if (isFirst) {
     try {
       await page.screenshot({ path: path.join(DEBUG_DIR, 'match-events.png') });
@@ -376,40 +390,108 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
-  // Try to extract events from the page
+  // Extract ALL text events from the page
   const events = await page.evaluate(() => {
     const evts = [];
+    const seen = new Set();
     const text = document.body.innerText || '';
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
 
-    // Look for goal/card/sub patterns in the text
+    // Parse the full page text for FFF event patterns:
+    // "But pour TEAM inscrit par PLAYER"
+    // "Carton jaune pour PLAYER (TEAM)"
+    // "Remplacement pour TEAM : PLAYER_IN remplace PLAYER_OUT"
+    // "Changement pour TEAM"
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5);
+
     for (const line of lines) {
-      // Goal: "63' El Khoumisti" or "But 63' Nom"
-      const goalMatch = line.match(/(\d+)[''′]\s*(.+)/);
-      if (goalMatch && line.length < 80) {
-        evts.push({ minute: parseInt(goalMatch[1]), text: line, raw: goalMatch[2] });
+      if (seen.has(line)) continue;
+
+      // But (goal)
+      if (/but\s+pour/i.test(line)) {
+        seen.add(line);
+        const m = line.match(/but\s+pour\s+(.+?)(?:inscrit|marqu[ée])\s+par\s+(.+)/i);
+        evts.push({
+          type: 'goal',
+          team: m ? m[1].trim() : '',
+          player: m ? m[2].trim() : '',
+          text: line
+        });
+      }
+      // Carton jaune
+      else if (/carton\s+jaune/i.test(line)) {
+        seen.add(line);
+        const m = line.match(/carton\s+jaune\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
+        evts.push({
+          type: 'yellowCard',
+          player: m ? m[1].trim() : '',
+          team: m ? (m[2] || '').trim() : '',
+          text: line
+        });
+      }
+      // Carton rouge
+      else if (/carton\s+rouge/i.test(line)) {
+        seen.add(line);
+        const m = line.match(/carton\s+rouge\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
+        evts.push({
+          type: 'redCard',
+          player: m ? m[1].trim() : '',
+          team: m ? (m[2] || '').trim() : '',
+          text: line
+        });
+      }
+      // Remplacement
+      else if (/remplacement|changement/i.test(line) && /remplace/i.test(line)) {
+        seen.add(line);
+        const m = line.match(/(.+?)\s+remplace\s+(.+)/i);
+        evts.push({
+          type: 'substitution',
+          playerIn: m ? m[1].trim() : '',
+          playerOut: m ? m[2].trim() : '',
+          text: line
+        });
+      }
+      // Avertissement
+      else if (/avertissement/i.test(line)) {
+        seen.add(line);
+        const m = line.match(/avertissement\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
+        evts.push({
+          type: 'yellowCard',
+          player: m ? m[1].trim() : '',
+          team: m ? (m[2] || '').trim() : '',
+          text: line
+        });
       }
     }
 
-    // Also check event-specific elements
-    document.querySelectorAll('[class*="event"], [class*="incident"], [class*="goal"], [class*="but"], [class*="carton"], [class*="remplac"]').forEach(el => {
-      const t = el.textContent.trim();
-      if (t.length > 2 && t.length < 200) {
-        evts.push({ text: t, raw: t });
-      }
-    });
+    // Also look for event elements in the DOM
+    const eventSelectors = [
+      '[class*="event"]', '[class*="Event"]', '[class*="timeline"]',
+      '[class*="incident"]', '[class*="action"]', '[class*="Action"]'
+    ];
+    for (const sel of eventSelectors) {
+      document.querySelectorAll(sel).forEach(el => {
+        const t = el.textContent.trim();
+        if (t.length > 5 && t.length < 300 && !seen.has(t)) {
+          if (/but|carton|remplac|avertiss|changement/i.test(t)) {
+            seen.add(t);
+            evts.push({ type: 'raw', text: t, player: '', team: '' });
+          }
+        }
+      });
+    }
 
-    return evts.slice(0, 30);
+    return evts;
   });
 
-  if (isFirst && events.length > 0) {
+  if (isFirst) {
     console.log(`   📊 ${events.length} événements trouvés:`);
-    for (const e of events.slice(0, 10)) {
-      console.log(`      ${e.text.slice(0, 80)}`);
+    for (const e of events) {
+      const icon = e.type === 'goal' ? '⚽' : e.type === 'yellowCard' ? '🟡' : e.type === 'redCard' ? '🔴' : e.type === 'substitution' ? '🔄' : '❓';
+      console.log(`      ${icon} ${e.player || e.playerIn || ''} ${e.text.slice(0, 70)}`);
     }
   }
 
-  // Match events to players by name
+  // Build surname lookup for our players
   const playersByName = {};
   for (const p of players) {
     const parts = normName(p.name).split(/\s+/);
@@ -420,14 +502,37 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     }
   }
 
-  for (const evt of events) {
-    const evtNorm = normName(evt.raw || evt.text);
+  function findPlayerByText(text) {
+    if (!text) return null;
+    const n = normName(text);
     for (const [surname, player] of Object.entries(playersByName)) {
-      if (evtNorm.includes(surname)) {
-        if (/but|goal|⚽/i.test(evt.text)) player.goals++;
-        else if (/jaune|yellow/i.test(evt.text)) player.yellowCards++;
-        else if (/rouge|red/i.test(evt.text)) player.redCards++;
-        break;
+      if (n.includes(surname)) return player;
+    }
+    return null;
+  }
+
+  // Apply events to players
+  for (const evt of events) {
+    if (evt.type === 'goal') {
+      const p = findPlayerByText(evt.player);
+      if (p) p.goals++;
+    } else if (evt.type === 'yellowCard') {
+      const p = findPlayerByText(evt.player);
+      if (p) p.yellowCards++;
+    } else if (evt.type === 'redCard') {
+      const p = findPlayerByText(evt.player);
+      if (p) p.redCards++;
+    } else if (evt.type === 'substitution') {
+      const pOut = findPlayerByText(evt.playerOut);
+      const pIn = findPlayerByText(evt.playerIn);
+      if (pOut && pOut.starter) pOut.minutes = 0; // will be refined later
+      if (pIn) pIn.minutes = 1; // came on as sub
+    } else if (evt.type === 'raw') {
+      const p = findPlayerByText(evt.text);
+      if (p) {
+        if (/but/i.test(evt.text)) p.goals++;
+        else if (/jaune|avertiss/i.test(evt.text)) p.yellowCards++;
+        else if (/rouge/i.test(evt.text)) p.redCards++;
       }
     }
   }
