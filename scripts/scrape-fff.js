@@ -21,20 +21,19 @@ const DEBUG_DIR = path.join(ROOT, '.cache', 'debug-fff');
 [OUTPUT_DIR, DEBUG_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 const FFF_URL = 'https://epreuves.fff.fr/competition/engagement/1-national/phase/1/1/resultats-et-calendrier';
-const TEAM_KEYWORDS = ['orléans', 'orleans', 'u-s-orleans', 'u.s. orleans'];
+const TEAM_KEYWORDS = ['orléans', 'orleans'];
 const BASE_URL = 'https://epreuves.fff.fr';
 const TEST_MODE = process.argv.includes('--test');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function normName(name) {
-  return (name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z\s-]/g, '').trim();
+  return (name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
 function matchesTeam(text) {
   if (!text) return false;
-  const lower = normName(text);
-  return TEAM_KEYWORDS.some(kw => lower.includes(normName(kw)));
+  return TEAM_KEYWORDS.some(kw => normName(text).includes(normName(kw)));
 }
 
 (async () => {
@@ -48,142 +47,86 @@ function matchesTeam(text) {
   await page.setViewport({ width: 1400, height: 900 });
 
   try {
-    // --- Page résultats ---
     console.log('🌐 Ouverture FFF résultats...');
     await page.goto(FFF_URL, { waitUntil: 'networkidle2', timeout: 45000 });
     await sleep(3000);
 
     // Accept cookies
     try {
-      const cookieBtn = await page.$('#didomi-notice-agree-button, [class*="cookie"] button, button[class*="accept"]');
-      if (cookieBtn) { await cookieBtn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
+      const btn = await page.$('#didomi-notice-agree-button');
+      if (btn) { await btn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
     } catch (_) {}
 
-    // Find all match links containing "orleans"
-    const matchLinks = await page.evaluate((base, keywords) => {
+    // Find Orléans match links
+    const matchLinks = await page.evaluate((base, kws) => {
       const links = [];
       const seen = new Set();
       document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
         const href = a.getAttribute('href');
         if (!href || seen.has(href)) return;
-        const fullUrl = href.startsWith('http') ? href : base + href;
-        const text = a.textContent.trim();
-        const parentText = a.closest('[class*="match"], [class*="Match"], div, tr')?.textContent?.trim() || text;
-        // Check if this match involves Orléans
-        const combined = (href + ' ' + parentText).toLowerCase();
-        const isOrleans = keywords.some(kw => combined.includes(kw.toLowerCase()));
-        if (isOrleans) {
-          seen.add(href);
-          links.push({ href: fullUrl, text: parentText.slice(0, 200) });
-        }
-      });
-      return links;
-    }, BASE_URL, TEAM_KEYWORDS);
-
-    // Also find match links near "orleans" text (scores as links)
-    const scoreLinks = await page.evaluate((base, keywords) => {
-      const links = [];
-      const seen = new Set();
-      document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
-        const href = a.getAttribute('href');
-        if (!href || seen.has(href)) return;
-        // Check parent row/card for Orléans reference
-        const container = a.closest('div, tr, li, [class*="match"]');
+        const container = a.closest('div, tr, li');
         if (!container) return;
-        const containerText = container.textContent.toLowerCase();
-        const isOrleans = keywords.some(kw => containerText.includes(kw.toLowerCase()));
-        if (isOrleans) {
+        const text = container.textContent.toLowerCase();
+        if (kws.some(kw => text.includes(kw))) {
           seen.add(href);
-          const fullUrl = href.startsWith('http') ? href : base + href;
-          links.push({ href: fullUrl, text: container.textContent.trim().slice(0, 200) });
+          links.push(href.startsWith('http') ? href : base + href);
         }
       });
       return links;
-    }, BASE_URL, TEAM_KEYWORDS);
+    }, BASE_URL, TEAM_KEYWORDS.map(k => k.toLowerCase()));
 
-    // Merge and deduplicate
-    const allLinks = [...matchLinks];
-    for (const sl of scoreLinks) {
-      if (!allLinks.some(l => l.href === sl.href)) allLinks.push(sl);
-    }
-
-    console.log(`📋 ${allLinks.length} match(s) Orléans trouvés`);
-
-    if (allLinks.length === 0) {
-      console.log('⚠️ Aucun lien de match trouvé. Vérifiez la page.');
-      try { await page.screenshot({ path: path.join(DEBUG_DIR, 'fff-no-matches.png') }); } catch (_) {}
-      console.log('\n(Fermez Chrome pour terminer)');
-      await new Promise(r => browser.on('disconnected', r));
+    console.log(`📋 ${matchLinks.length} match(s) Orléans trouvés`);
+    if (matchLinks.length === 0) {
+      console.log('⚠️ Aucun lien trouvé');
       return;
     }
 
-    const toProcess = TEST_MODE ? allLinks.slice(0, 1) : allLinks.slice(0, 5);
-    if (TEST_MODE) console.log('\n🧪 MODE TEST — 1 seul match');
-    console.log(`\n🎯 ${toProcess.length} match(s) à traiter :`);
-    toProcess.forEach((m, i) => {
-      console.log(`  ${i + 1}. ${m.href.split('/').pop().replace(/-/g, ' ').slice(0, 80)}`);
-    });
+    const toProcess = TEST_MODE ? matchLinks.slice(0, 1) : matchLinks.slice(0, 5);
+    if (TEST_MODE) console.log('\n🧪 MODE TEST — 1 seul match\n');
 
-    // Process each match
     const allResults = [];
     for (let i = 0; i < toProcess.length; i++) {
-      const match = toProcess[i];
-      console.log(`\n🔍 [${i + 1}/${toProcess.length}] ${match.href.split('/').pop().slice(0, 60)}...`);
+      const url = toProcess[i];
+      const slug = url.split('/').pop().slice(0, 70);
+      console.log(`🔍 [${i + 1}/${toProcess.length}] ${slug}...`);
 
       try {
-        const detail = await scrapeMatchDetail(page, match.href, i === 0);
-        if (detail) {
+        const detail = await scrapeMatchDetail(page, url, i === 0);
+        if (detail && detail.players.length > 0) {
           allResults.push(detail);
           const g = detail.players.reduce((s, p) => s + p.goals, 0);
           const c = detail.players.reduce((s, p) => s + p.yellowCards + p.redCards, 0);
-          const a = detail.players.reduce((s, p) => s + p.assists, 0);
-          console.log(`   ✅ ${detail.players.length} joueurs | ${g} but(s), ${a} passe(s) D, ${c} carton(s)`);
+          const starters = detail.players.filter(p => p.starter).length;
+          const subs = detail.players.filter(p => !p.starter).length;
+          console.log(`   ✅ ${detail.players.length} joueurs (${starters} titu + ${subs} rempl.) | ${g} but(s), ${c} carton(s)`);
 
-          if (TEST_MODE && detail.players.length > 0) {
-            console.log('\n   ┌────┬──────────────────────────┬──────┬──────┬────┬────┬─────────┐');
-            console.log('   │ #  │ Nom                      │ Titu │ Min  │ B  │ PD │ Cartons │');
-            console.log('   ├────┼──────────────────────────┼──────┼──────┼────┼────┼─────────┤');
-            for (const p of detail.players) {
-              const num = (p.number || '-').toString().padStart(2);
-              const name = (p.name || '').padEnd(24).slice(0, 24);
-              const titu = p.starter ? 'OUI' : 'NON';
-              const min = String(p.minutes).padStart(4);
-              const buts = String(p.goals).padStart(2);
-              const pd = String(p.assists).padStart(2);
-              const cj = p.yellowCards ? `${p.yellowCards}J` : '  ';
-              const cr = p.redCards ? `${p.redCards}R` : '  ';
-              const cartons = `${cj} ${cr}`.trim() || '-';
-              console.log(`   │ ${num} │ ${name} │ ${titu}  │ ${min} │ ${buts} │ ${pd} │ ${cartons.padEnd(7)} │`);
-            }
-            console.log('   └────┴──────────────────────────┴──────┴──────┴────┴────┴─────────┘');
-          }
+          if (TEST_MODE) printPlayerTable(detail);
         } else {
-          console.log('   ⚠️ Pas de données trouvées');
+          console.log('   ⚠️ Pas de données');
         }
       } catch (err) {
-        console.log(`   ❌ Erreur: ${err.message}`);
+        console.log(`   ❌ ${err.message}`);
       }
     }
 
-    // Save results
     if (allResults.length > 0) {
       const stamp = new Date().toISOString().slice(0, 10);
       const outFile = path.join(OUTPUT_DIR, `fff-orleans-${stamp}.json`);
       fs.writeFileSync(outFile, JSON.stringify(allResults, null, 2));
-      console.log(`\n✅ ${allResults.length} match(s) extraits : ${outFile}`);
-      console.log('👉 Importez ce fichier dans l\'app via "⚡ Importer FlashScore".');
+      console.log(`\n✅ ${allResults.length} match(s) → ${outFile}`);
     } else {
       console.log('\n⚠️ Aucune donnée extraite.');
     }
 
   } catch (err) {
-    console.log(`\n❌ Erreur générale: ${err.message}`);
-    try { await page.screenshot({ path: path.join(DEBUG_DIR, 'fff-error.png') }); } catch (_) {}
+    console.log(`❌ ${err.message}`);
   }
 
   console.log('\n(Fermez Chrome pour terminer)');
   await new Promise(r => browser.on('disconnected', r));
 })();
+
+// ─── Match detail extraction ────────────────────────────────────────
 
 async function scrapeMatchDetail(page, matchUrl, isFirst) {
   await page.goto(matchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
@@ -192,267 +135,283 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   if (isFirst) {
     try {
       await page.screenshot({ path: path.join(DEBUG_DIR, 'match-page.png') });
-      const html = await page.evaluate(() => document.body.innerHTML);
-      fs.writeFileSync(path.join(DEBUG_DIR, 'match-page.html'), html);
-      console.log('   📸 Debug: .cache/debug-fff/match-page.png');
+      fs.writeFileSync(path.join(DEBUG_DIR, 'match-page.html'),
+        await page.evaluate(() => document.body.innerHTML));
     } catch (_) {}
   }
 
-  // Extract match header info (teams, score, date, round)
-  const matchInfo = await page.evaluate(() => {
-    const getText = (sels) => {
-      for (const s of sels) {
-        const el = document.querySelector(s);
-        if (el) return el.textContent.trim();
+  // ─── Extract all structured data from the page ───
+  const raw = await page.evaluate(() => {
+    const text = document.body.innerText || '';
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+    // Find ALL table rows with number + name pattern
+    const tableRows = [];
+    document.querySelectorAll('table tr').forEach(tr => {
+      const cells = Array.from(tr.querySelectorAll('td'));
+      if (cells.length >= 2) {
+        const texts = cells.map(c => c.textContent.trim());
+        tableRows.push(texts);
       }
-      return '';
-    };
+    });
 
-    const bodyText = document.body.innerText || '';
-    const info = {
-      homeTeam: '',
-      awayTeam: '',
-      scoreHome: '',
-      scoreAway: '',
-      date: '',
-      round: '',
-      pageText: bodyText.slice(0, 3000)
-    };
-
-    // Try to find team names - FFF typically has them in headers
-    const teamEls = document.querySelectorAll('[class*="team"], [class*="Team"], [class*="club"], [class*="Club"], h2, h3');
+    // Find team names (typically in specific elements near the score)
     const teamNames = [];
+    const teamEls = document.querySelectorAll('h1, h2, h3, [class*="team"], [class*="Team"], [class*="club"], [class*="Club"]');
     for (const el of teamEls) {
       const t = el.textContent.trim();
-      if (t.length >= 3 && t.length <= 60 && !teamNames.includes(t)) {
-        teamNames.push(t);
-      }
-    }
-    if (teamNames.length >= 2) {
-      info.homeTeam = teamNames[0];
-      info.awayTeam = teamNames[1];
+      if (t.length >= 4 && t.length <= 50) teamNames.push(t);
     }
 
-    // Try to find score
-    const scoreEls = document.querySelectorAll('[class*="score"], [class*="Score"], [class*="result"], [class*="Result"]');
-    for (const el of scoreEls) {
-      const m = el.textContent.trim().match(/(\d+)\s*[-–:]\s*(\d+)/);
-      if (m) {
-        info.scoreHome = m[1];
-        info.scoreAway = m[2];
-        break;
-      }
-    }
-    if (!info.scoreHome) {
-      const m = bodyText.match(/(\d+)\s*[-–:]\s*(\d+)/);
-      if (m) { info.scoreHome = m[1]; info.scoreAway = m[2]; }
-    }
+    // Also find team names from page title or main heading
+    const titleMatch = document.title.match(/(.+?)\s*[-–vs]\s*(.+?)(?:\s*\||\s*$)/);
 
-    // Date
-    const dateMatch = bodyText.match(/(\d{1,2})\s+(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)\s+(\d{4})/i);
-    if (dateMatch) {
-      const months = { janvier: '01', 'février': '02', mars: '03', avril: '04', mai: '05', juin: '06',
-        juillet: '07', 'août': '08', septembre: '09', octobre: '10', novembre: '11', 'décembre': '12' };
-      info.date = `${dateMatch[3]}-${months[dateMatch[2].toLowerCase()] || '01'}-${dateMatch[1].padStart(2, '0')}`;
-    }
-
-    // Round
-    const roundMatch = bodyText.match(/(?:journée|j)\s*(\d+)/i);
-    if (roundMatch) info.round = `Journée ${roundMatch[1]}`;
-
-    return info;
+    return { lines: lines.slice(0, 200), tableRows: tableRows.slice(0, 80), teamNames, title: document.title };
   });
 
-  console.log(`   📋 ${matchInfo.homeTeam || '?'} ${matchInfo.scoreHome}-${matchInfo.scoreAway} ${matchInfo.awayTeam || '?'} (${matchInfo.round || '?'})`);
+  // ─── Parse team names from title ───
+  // Title format: "Match Orléans vs Concarneau | FFF" or similar
+  let homeTeam = '', awayTeam = '';
+  // Try from URL: 53441338-u-s-orleans-loiret-football-u-s-concarnoise-beuzecquoise
+  const urlSlug = matchUrl.split('/').pop();
+  const slugParts = urlSlug.replace(/^\d+-/, '').split(/-(?=[a-z])/);
 
-  const isHome = matchesTeam(matchInfo.homeTeam);
-  const isAway = matchesTeam(matchInfo.awayTeam);
-  if (!isHome && !isAway) {
-    console.log('   ⚠️ Orléans non identifié dans les équipes');
-    if (isFirst) {
-      console.log(`   Home: "${matchInfo.homeTeam}", Away: "${matchInfo.awayTeam}"`);
-      console.log(`   Page (500 car.): ${matchInfo.pageText.slice(0, 500)}`);
+  // Find team names from the page lines
+  for (const line of raw.lines) {
+    if (matchesTeam(line) && line.length <= 30) {
+      if (!homeTeam) homeTeam = line;
+      else if (line !== homeTeam) { awayTeam = line; break; }
     }
   }
+
+  // Try from raw.teamNames if not found
+  if (!homeTeam || !awayTeam) {
+    for (const tn of raw.teamNames) {
+      if (!homeTeam && tn.length <= 50) homeTeam = tn;
+      else if (homeTeam && tn !== homeTeam && tn.length <= 50) { awayTeam = tn; break; }
+    }
+  }
+
+  // ─── Find score ───
+  let scoreHome = '', scoreAway = '';
+  for (const line of raw.lines) {
+    // Look for standalone score like "1 - 1" or "2 - 0"
+    const m = line.match(/^(\d{1,2})\s*[-–]\s*(\d{1,2})$/);
+    if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
+  }
+
+  // ─── Find date ───
+  let matchDate = '';
+  const monthMap = { janvier: '01', 'février': '02', mars: '03', avril: '04', mai: '05', juin: '06',
+    juillet: '07', 'août': '08', septembre: '09', octobre: '10', novembre: '11', 'décembre': '12' };
+  for (const line of raw.lines) {
+    const dm = line.match(/(\d{1,2})\s+(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)\s+(\d{4})/i);
+    if (dm) {
+      matchDate = `${dm[3]}-${monthMap[dm[2].toLowerCase()]}-${dm[1].padStart(2, '0')}`;
+      break;
+    }
+  }
+
+  // ─── Find round ───
+  let round = '';
+  for (const line of raw.lines) {
+    const rm = line.match(/journée\s+(\d+)/i);
+    if (rm) { round = `Journée ${rm[1]}`; break; }
+  }
+
+  // ─── Determine our side ───
+  const isHome = matchesTeam(homeTeam);
   const ourSide = isHome ? 'home' : 'away';
-  const opponent = isHome ? matchInfo.awayTeam : matchInfo.homeTeam;
+  const opponent = isHome ? awayTeam : homeTeam;
 
-  // Look for tabs: feuille de match, compositions, résumé
-  const tabs = await page.evaluate(() => {
-    const results = [];
-    const candidates = document.querySelectorAll('a, button, [role="tab"], [class*="tab"], [class*="Tab"], li, nav a, [class*="nav"] a');
-    for (const el of candidates) {
-      const t = el.textContent.trim();
-      if (t.length >= 2 && t.length <= 40) {
-        results.push({ text: t, tag: el.tagName, href: el.href || '' });
-      }
-    }
-    return results;
-  });
+  console.log(`   📋 ${homeTeam} ${scoreHome}-${scoreAway} ${awayTeam} (${round})`);
 
-  if (isFirst) {
-    const tabNames = tabs.map(t => t.text).filter(t => /feuille|compo|resum|lineup|match|stat/i.test(t));
-    console.log(`   📌 Onglets: ${tabNames.join(', ') || '(aucun pertinent)'}`);
-  }
+  // ─── Extract players from tables ───
+  // FFF feuille de match: tables with rows [number, name, ...]
+  // Two blocks: home team first (11 starters + ~5 subs), then away team (11 + ~5)
+  const allPlayers = [];
+  const KNOWN_TEAMS = ['dijon', 'sochaux', 'rouen', 'fleury', 'puy', 'versailles', 'valenciennes',
+    'caen', 'villefranche', 'aubagne', 'concarneau', 'paris 13', 'quevilly', 'bourg', 'chateauroux',
+    'briochin', 'fcvb', 'fbbp', 'qrm', 'berri', 'nimes'];
 
-  // Try to click on "Feuille de match" tab
-  await clickTab(page, ['feuille de match', 'feuille', 'compositions', 'compo']);
-  await sleep(3000);
+  for (const row of raw.tableRows) {
+    // Check for number + name pattern
+    for (let ci = 0; ci < row.length - 1; ci++) {
+      const num = row[ci].replace(/[^\d]/g, '');
+      const name = row[ci + 1];
+      if (!/^\d{1,2}$/.test(num)) continue;
+      if (!name || name.length < 3 || name.length > 50) continue;
 
-  if (isFirst) {
-    try {
-      await page.screenshot({ path: path.join(DEBUG_DIR, 'match-feuille.png') });
-      const html = await page.evaluate(() => document.body.innerHTML);
-      fs.writeFileSync(path.join(DEBUG_DIR, 'match-feuille.html'), html);
-      console.log('   📸 Debug feuille: .cache/debug-fff/match-feuille.png');
-    } catch (_) {}
-  }
+      // Skip if this looks like a standings row (team name)
+      const lower = name.toLowerCase();
+      if (KNOWN_TEAMS.some(t => lower.includes(t))) continue;
+      if (/^[A-Z\s.]+$/.test(name) && (name.includes(' FC') || name.includes(' US') || name.includes(' SC'))) continue;
 
-  // Extract lineup data from the page
-  const lineupData = await page.evaluate((isHome) => {
-    const text = document.body.innerText || '';
-    const html = document.body.innerHTML || '';
-    const data = { starters: [], subs: [], events: [], debug: '' };
+      // Skip duplicates
+      if (allPlayers.some(p => p.name === name)) continue;
 
-    // Strategy 1: Look for structured player lists
-    // FFF feuille de match typically has player rows with number + name
-    const playerPattern = /(\d{1,2})\s+([A-ZÀ-Ý][A-ZÀ-Ý\s\-']+(?:\s+[A-Za-zà-ÿ\-']+)*)/g;
-    let m;
-
-    // Find all sections that might be team-specific
-    const sections = document.querySelectorAll('[class*="team"], [class*="Team"], [class*="club"], [class*="composition"], [class*="lineup"], [class*="feuille"], [class*="Feuille"], table, [class*="section"], [class*="Section"]');
-
-    // Also look for table rows with player data
-    const tables = document.querySelectorAll('table');
-    for (const table of tables) {
-      const rows = table.querySelectorAll('tr');
-      for (const row of rows) {
-        const cells = Array.from(row.querySelectorAll('td, th'));
-        if (cells.length >= 2) {
-          const cellTexts = cells.map(c => c.textContent.trim());
-          const text = cellTexts.join(' | ');
-          // Look for jersey number + name pattern
-          for (let ci = 0; ci < cells.length - 1; ci++) {
-            const maybeNum = cellTexts[ci].replace(/[^\d]/g, '');
-            const maybeName = cellTexts[ci + 1];
-            if (/^\d{1,2}$/.test(maybeNum) && maybeName && maybeName.length >= 3 && maybeName.length <= 50) {
-              data.starters.push({
-                number: maybeNum,
-                name: maybeName,
-                rawRow: text.slice(0, 150)
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // Strategy 2: Look for divs/spans with player info
-    if (data.starters.length === 0) {
-      const playerEls = document.querySelectorAll('[class*="player"], [class*="Player"], [class*="joueur"], [class*="Joueur"], [class*="lf__"], [class*="lineup"]');
-      for (const el of playerEls) {
-        const t = el.textContent.trim();
-        const m = t.match(/^(\d{1,2})\s+(.+)$/);
-        if (m) {
-          data.starters.push({ number: m[1], name: m[2].trim() });
-        }
-      }
-    }
-
-    // Strategy 3: Extract from raw text using regex
-    if (data.starters.length === 0) {
-      const lines = text.split('\n');
-      for (const line of lines) {
-        const clean = line.trim();
-        const m = clean.match(/^(\d{1,2})\s+([A-ZÀ-Ý][a-zà-ÿA-ZÀ-Ý\s\-']{2,40})$/);
-        if (m) {
-          data.starters.push({ number: m[1], name: m[2].trim() });
-        }
-      }
-    }
-
-    // Extract events: goals, cards, substitutions from page text
-    const goalPattern = /(\d+)[''′]\s*(?:⚽|but)?\s*([A-ZÀ-Ý][a-zà-ÿA-ZÀ-Ý\s\-']+)/gi;
-    const cardPattern = /(carton\s+(?:jaune|rouge))\s*[-:]\s*(\d+)[''′]\s*([A-ZÀ-Ý][a-zà-ÿA-ZÀ-Ý\s\-']+)/gi;
-
-    // Look for event/incident elements
-    const eventEls = document.querySelectorAll('[class*="event"], [class*="Event"], [class*="incident"], [class*="goal"], [class*="card"], [class*="substitut"]');
-    for (const el of eventEls) {
-      const t = el.textContent.trim();
-      if (t.length > 2 && t.length < 200) {
-        data.events.push(t);
-      }
-    }
-
-    data.debug = text.slice(0, 5000);
-    return data;
-  }, isHome);
-
-  if (isFirst) {
-    console.log(`   🔎 Starters trouvés: ${lineupData.starters.length}`);
-    console.log(`   🔎 Events trouvés: ${lineupData.events.length}`);
-    if (lineupData.starters.length === 0) {
-      // Show page text to help identify the correct selectors
-      const lines = lineupData.debug.split('\n').filter(l => l.trim().length > 0).slice(0, 40);
-      console.log('   📄 Contenu page (40 premières lignes):');
-      for (const line of lines) {
-        console.log(`      ${line.slice(0, 120)}`);
-      }
-    } else {
-      console.log('   📄 Joueurs trouvés:');
-      for (const p of lineupData.starters.slice(0, 5)) {
-        console.log(`      #${p.number} ${p.name}`);
-      }
-      if (lineupData.starters.length > 5) console.log(`      ... et ${lineupData.starters.length - 5} autres`);
+      allPlayers.push({ number: num, name });
     }
   }
 
-  // Build player list
-  // For now, all found players go in — we'll filter for Orléans in the import
-  const players = lineupData.starters.map(p => ({
+  if (isFirst) console.log(`   🔎 ${allPlayers.length} joueurs trouvés dans les tables`);
+
+  // ─── Split into two teams ───
+  // The FFF page lists home team first, then away team.
+  // Heuristic: detect team boundary when jersey #1 appears again (second GK)
+  let splitIdx = -1;
+  for (let i = 1; i < allPlayers.length; i++) {
+    if (allPlayers[i].number === '1' && i >= 10) {
+      splitIdx = i;
+      break;
+    }
+  }
+
+  let homePlayers, awayPlayers;
+  if (splitIdx > 0) {
+    homePlayers = allPlayers.slice(0, splitIdx);
+    awayPlayers = allPlayers.slice(splitIdx);
+  } else {
+    // Fallback: split in half
+    const half = Math.ceil(allPlayers.length / 2);
+    homePlayers = allPlayers.slice(0, half);
+    awayPlayers = allPlayers.slice(half);
+  }
+
+  if (isFirst) console.log(`   🔎 Split: ${homePlayers.length} home, ${awayPlayers.length} away`);
+
+  // Pick Orléans side
+  const ourPlayers = isHome ? homePlayers : awayPlayers;
+
+  // Mark starters (first 11) vs subs
+  const players = ourPlayers.map((p, i) => ({
     name: p.name,
-    number: p.number || '',
+    number: p.number,
     team: ourSide,
-    starter: true,
-    minutes: 90,
+    starter: i < 11,
+    minutes: i < 11 ? 90 : 0,
     goals: 0,
     assists: 0,
     yellowCards: 0,
     redCards: 0
   }));
 
+  // ─── Extract events from page text ───
+  // Look for the "Le match" tab content — events like goals, cards
+  await clickTab(page, ['le match']);
+  await sleep(2000);
+
+  if (isFirst) {
+    try {
+      await page.screenshot({ path: path.join(DEBUG_DIR, 'match-events.png') });
+      fs.writeFileSync(path.join(DEBUG_DIR, 'match-events.html'),
+        await page.evaluate(() => document.body.innerHTML));
+      console.log('   📸 Debug events: .cache/debug-fff/match-events.png');
+    } catch (_) {}
+  }
+
+  // Try to extract events from the page
+  const events = await page.evaluate(() => {
+    const evts = [];
+    const text = document.body.innerText || '';
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l);
+
+    // Look for goal/card/sub patterns in the text
+    for (const line of lines) {
+      // Goal: "63' El Khoumisti" or "But 63' Nom"
+      const goalMatch = line.match(/(\d+)[''′]\s*(.+)/);
+      if (goalMatch && line.length < 80) {
+        evts.push({ minute: parseInt(goalMatch[1]), text: line, raw: goalMatch[2] });
+      }
+    }
+
+    // Also check event-specific elements
+    document.querySelectorAll('[class*="event"], [class*="incident"], [class*="goal"], [class*="but"], [class*="carton"], [class*="remplac"]').forEach(el => {
+      const t = el.textContent.trim();
+      if (t.length > 2 && t.length < 200) {
+        evts.push({ text: t, raw: t });
+      }
+    });
+
+    return evts.slice(0, 30);
+  });
+
+  if (isFirst && events.length > 0) {
+    console.log(`   📊 ${events.length} événements trouvés:`);
+    for (const e of events.slice(0, 10)) {
+      console.log(`      ${e.text.slice(0, 80)}`);
+    }
+  }
+
+  // Match events to players by name
+  const playersByName = {};
+  for (const p of players) {
+    const parts = normName(p.name).split(/\s+/);
+    for (const part of parts) {
+      if (part.length >= 3) {
+        if (!playersByName[part]) playersByName[part] = p;
+      }
+    }
+  }
+
+  for (const evt of events) {
+    const evtNorm = normName(evt.raw || evt.text);
+    for (const [surname, player] of Object.entries(playersByName)) {
+      if (evtNorm.includes(surname)) {
+        if (/but|goal|⚽/i.test(evt.text)) player.goals++;
+        else if (/jaune|yellow/i.test(evt.text)) player.yellowCards++;
+        else if (/rouge|red/i.test(evt.text)) player.redCards++;
+        break;
+      }
+    }
+  }
+
   if (players.length === 0) return null;
 
   return {
-    matchId: matchUrl.split('/').pop(),
-    date: matchInfo.date || '',
-    round: matchInfo.round || '',
-    home: matchInfo.homeTeam,
-    away: matchInfo.awayTeam,
-    scoreHome: matchInfo.scoreHome,
-    scoreAway: matchInfo.scoreAway,
+    matchId: urlSlug,
+    date: matchDate,
+    round,
+    home: homeTeam,
+    away: awayTeam,
+    scoreHome,
+    scoreAway,
     venue: isHome ? 'Domicile' : 'Extérieur',
     opponent,
     players,
-    rawEvents: lineupData.events
+    rawEvents: events
   };
 }
 
 async function clickTab(page, keywords) {
   try {
-    const clicked = await page.evaluate((kws) => {
-      const candidates = document.querySelectorAll('a, button, [role="tab"], [class*="tab"], [class*="Tab"], li, nav a, [class*="nav"] a, [class*="menu"] a');
-      for (const el of candidates) {
-        const text = el.textContent.trim().toLowerCase();
+    await page.evaluate((kws) => {
+      const els = document.querySelectorAll('a, button, [role="tab"], li, nav a');
+      for (const el of els) {
+        const t = el.textContent.trim().toLowerCase();
         for (const kw of kws) {
-          if (text.includes(kw.toLowerCase()) && text.length < 40) {
-            el.click();
-            return text;
-          }
+          if (t.includes(kw) && t.length < 30) { el.click(); return; }
         }
       }
-      return null;
     }, keywords);
-    if (clicked) console.log(`   📌 Onglet: "${clicked}"`);
   } catch (_) {}
+}
+
+function printPlayerTable(detail) {
+  console.log(`\n   ${detail.home} ${detail.scoreHome}-${detail.scoreAway} ${detail.away} — ${detail.round}`);
+  console.log('   ┌────┬──────────────────────────┬──────┬────┬────┬─────────┐');
+  console.log('   │ #  │ Nom                      │ Titu │ B  │ PD │ Cartons │');
+  console.log('   ├────┼──────────────────────────┼──────┼────┼────┼─────────┤');
+  for (const p of detail.players) {
+    const num = (p.number || '-').toString().padStart(2);
+    const name = (p.name || '').padEnd(24).slice(0, 24);
+    const titu = p.starter ? 'OUI' : 'non';
+    const buts = String(p.goals).padStart(2);
+    const pd = String(p.assists).padStart(2);
+    const cj = p.yellowCards ? `${p.yellowCards}J` : '  ';
+    const cr = p.redCards ? `${p.redCards}R` : '  ';
+    const cartons = `${cj} ${cr}`.trim() || '-';
+    console.log(`   │ ${num} │ ${name} │ ${titu}  │ ${buts} │ ${pd} │ ${cartons.padEnd(7)} │`);
+  }
+  console.log('   └────┴──────────────────────────┴──────┴────┴────┴─────────┘');
 }
