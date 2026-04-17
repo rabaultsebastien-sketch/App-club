@@ -57,27 +57,93 @@ function matchesTeam(text) {
       if (btn) { await btn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
     } catch (_) {}
 
-    // Find Orléans match links
+    // Find Orléans match links (check href and container text)
     const matchLinks = await page.evaluate((base, kws) => {
+      const allMatchLinks = document.querySelectorAll('a[href*="/competition/match/"]');
+      const debug = { total: allMatchLinks.length, sampleHrefs: [] };
       const links = [];
       const seen = new Set();
-      document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
-        const href = a.getAttribute('href');
-        if (!href || seen.has(href)) return;
-        const container = a.closest('div, tr, li');
-        if (!container) return;
-        const text = container.textContent.toLowerCase();
-        if (kws.some(kw => text.includes(kw))) {
+
+      allMatchLinks.forEach(a => {
+        const href = a.getAttribute('href') || '';
+        if (seen.has(href)) return;
+        if (debug.sampleHrefs.length < 5) debug.sampleHrefs.push(href);
+
+        // Check if "orleans" is in the href itself
+        const hrefLower = href.toLowerCase();
+        const inHref = kws.some(kw => hrefLower.includes(kw));
+
+        // Check if "orleans" is in the surrounding container text
+        const container = a.closest('div, tr, li, section');
+        const containerText = container ? container.textContent.toLowerCase() : '';
+        const inContainer = kws.some(kw => containerText.includes(kw));
+
+        if (inHref || inContainer) {
           seen.add(href);
           links.push(href.startsWith('http') ? href : base + href);
         }
       });
-      return links;
+
+      return { links, debug };
     }, BASE_URL, TEAM_KEYWORDS.map(k => k.toLowerCase()));
 
-    console.log(`📋 ${matchLinks.length} match(s) Orléans trouvés`);
-    if (matchLinks.length === 0) {
-      console.log('⚠️ Aucun lien trouvé');
+    console.log(`📋 ${matchLinks.debug.total} liens match total, ${matchLinks.links.length} Orléans`);
+    if (matchLinks.debug.total > 0 && matchLinks.links.length === 0) {
+      console.log('   Exemples de liens:');
+      for (const h of matchLinks.debug.sampleHrefs) console.log(`   → ${h}`);
+    }
+
+    if (matchLinks.links.length === 0) {
+      // Maybe the page shows a week without Orléans matches — try navigating back
+      console.log('🔄 Navigation vers les semaines précédentes...');
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await page.evaluate(() => {
+            const prevBtns = document.querySelectorAll('button, a, [class*="prev"], [class*="Prev"], [class*="navigation"]');
+            for (const btn of prevBtns) {
+              const t = btn.textContent.trim().toLowerCase();
+              const cls = (btn.className || '').toLowerCase();
+              if (t.includes('précédent') || t.includes('previous') || cls.includes('prev') || t === '<' || t === '‹') {
+                btn.click();
+                return true;
+              }
+            }
+            // Also try aria-label
+            const ariaBtn = document.querySelector('[aria-label*="précédent"], [aria-label*="previous"]');
+            if (ariaBtn) { ariaBtn.click(); return true; }
+            return false;
+          });
+          await sleep(3000);
+
+          const found = await page.evaluate((base, kws) => {
+            const links = [];
+            const seen = new Set();
+            document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
+              const href = a.getAttribute('href') || '';
+              if (seen.has(href)) return;
+              const hrefLower = href.toLowerCase();
+              if (kws.some(kw => hrefLower.includes(kw))) {
+                seen.add(href);
+                links.push(href.startsWith('http') ? href : base + href);
+              }
+            });
+            return links;
+          }, BASE_URL, TEAM_KEYWORDS.map(k => k.toLowerCase()));
+
+          if (found.length > 0) {
+            console.log(`   ✅ ${found.length} match(s) trouvés`);
+            matchLinks.links.push(...found);
+            break;
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (matchLinks.links.length === 0) {
+      console.log('⚠️ Aucun match Orléans trouvé après navigation');
+      try { await page.screenshot({ path: path.join(DEBUG_DIR, 'fff-no-matches.png') }); } catch (_) {}
+      console.log('\n(Fermez Chrome pour terminer)');
+      await new Promise(r => browser.on('disconnected', r));
       return;
     }
 
