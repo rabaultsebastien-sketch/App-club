@@ -362,21 +362,18 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     redCards: 0
   }));
 
-  // ─── Extract events from page text ───
-  // Look for the "Le match" tab content — events like goals, cards
-  await clickTab(page, ['le match']);
+  // ─── Extract events (goals, cards, subs, assists) ───
+  // Try "Résumé" tab (user-confirmed), then "Le match"
+  await clickTab(page, ['résumé', 'resume', 'le match']);
   await sleep(2000);
 
-  // Click "Voir plus" to expand all events
+  // Expand all events
   try {
     await page.evaluate(() => {
-      const btns = document.querySelectorAll('button, a, [class*="more"], [class*="More"], [class*="voir"], [class*="Voir"]');
-      for (const btn of btns) {
+      document.querySelectorAll('button, a').forEach(btn => {
         const t = btn.textContent.trim().toLowerCase();
-        if (t.includes('voir plus') || t.includes('voir tout') || t.includes('afficher')) {
-          btn.click();
-        }
-      }
+        if (t.includes('voir plus') || t.includes('voir tout') || t.includes('afficher')) btn.click();
+      });
     });
     await sleep(2000);
   } catch (_) {}
@@ -386,114 +383,143 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       await page.screenshot({ path: path.join(DEBUG_DIR, 'match-events.png') });
       fs.writeFileSync(path.join(DEBUG_DIR, 'match-events.html'),
         await page.evaluate(() => document.body.innerHTML));
-      console.log('   📸 Debug events: .cache/debug-fff/match-events.png');
+      console.log('   📸 Debug: .cache/debug-fff/match-events.{png,html}');
     } catch (_) {}
   }
 
-  // Extract ALL text events from the page
-  const events = await page.evaluate(() => {
-    const evts = [];
+  // Collect raw event text blobs from the page (both DOM + innerText)
+  const rawEventTexts = await page.evaluate(() => {
+    const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|passe|buteur/i;
+    const texts = [];
     const seen = new Set();
-    const text = document.body.innerText || '';
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 5);
 
-    // FFF concatenates without spaces: "Avertissement pour CONCARNEAU USFLAVIO DA SILVA est averti"
-    // Parse by keying on ACTION words: "est averti", "inscrit par", "remplace"
-    for (const line of lines) {
-      if (seen.has(line)) continue;
-      const minMatch = line.match(/(\d+)[''′e]\s*/);
-      const minute = minMatch ? parseInt(minMatch[1]) : 0;
-
-      // "...inscrit par PLAYER_NAME" → goal
-      if (/inscrit\s+par/i.test(line)) {
-        seen.add(line);
-        const m = line.match(/inscrit\s+par\s+(.+)/i);
-        const tm = line.match(/but\s+pour\s+(.+?)(?:inscrit|marqu)/i);
-        evts.push({ type: 'goal', player: m ? m[1].trim() : '', team: tm ? tm[1].trim() : '', minute, text: line });
-      }
-      // "...PLAYER_NAME est averti" → yellow card
-      else if (/est averti/i.test(line)) {
-        seen.add(line);
-        const m = line.match(/([A-ZÀ-Ý][A-ZÀ-Ý\s\-']{2,40}?)\s*est averti/i);
-        const tm = line.match(/avertissement\s+pour\s+(.+?)(?=[A-Z]{2,}[a-z]|[A-Z]{2,}\s+est)/i);
-        evts.push({ type: 'yellowCard', player: m ? m[1].trim() : '', team: tm ? tm[1].trim() : '', minute, text: line });
-      }
-      // "...est exclu" or "carton rouge" → red card
-      else if (/est exclu|carton\s+rouge/i.test(line)) {
-        seen.add(line);
-        const m = line.match(/([A-ZÀ-Ý][A-ZÀ-Ý\s\-']{2,40}?)\s*est exclu/i);
-        evts.push({ type: 'redCard', player: m ? m[1].trim() : '', team: '', minute, text: line });
-      }
-      // "...PLAYER_IN remplace PLAYER_OUT" → substitution
-      else if (/remplace/i.test(line)) {
-        seen.add(line);
-        const m = line.match(/([A-ZÀ-Ý][A-ZÀ-Ý\s\-']{2,40}?)\s*remplace\s+(.+)/i);
-        evts.push({ type: 'substitution', playerIn: m ? m[1].trim() : '', playerOut: m ? m[2].trim() : '', minute, text: line });
+    // Strategy 1: DOM textContent (captures concatenated text like "45inscrit par")
+    for (const el of document.querySelectorAll('div, span, li, p, td, article, section')) {
+      if (el.children.length > 10) continue;
+      const t = el.textContent.trim();
+      if (t.length >= 10 && t.length <= 500 && KW.test(t) && !seen.has(t)) {
+        seen.add(t);
+        texts.push(t);
       }
     }
 
-    return evts;
+    // Strategy 2: innerText lines (catches text split across elements)
+    for (const line of (document.body.innerText || '').split('\n').map(l => l.trim())) {
+      if (line.length >= 10 && line.length <= 500 && KW.test(line) && !seen.has(line)) {
+        seen.add(line);
+        texts.push(line);
+      }
+    }
+
+    return texts;
   });
 
   if (isFirst) {
-    console.log(`   📊 ${events.length} événements trouvés:`);
-    for (const e of events) {
-      const icon = e.type === 'goal' ? '⚽' : e.type === 'yellowCard' ? '🟡' : e.type === 'redCard' ? '🔴' : e.type === 'substitution' ? '🔄' : '❓';
-      console.log(`      ${icon} ${e.player || e.playerIn || ''} ${e.text.slice(0, 70)}`);
-    }
+    console.log(`   📊 ${rawEventTexts.length} événements bruts:`);
+    for (const t of rawEventTexts) console.log(`      📝 ${t.slice(0, 90)}`);
   }
 
-  // Build surname lookup for our players
+  // Player name lookup — map surname parts (≥3 chars) to player objects
   const playersByName = {};
   for (const p of players) {
-    const parts = normName(p.name).split(/\s+/);
-    for (const part of parts) {
+    for (const part of normName(p.name).split(/\s+/)) {
       if (part.length >= 3) {
-        if (!playersByName[part]) playersByName[part] = p;
+        if (!playersByName[part] || part.length > playersByName[part]._keyLen) {
+          playersByName[part] = p;
+          p._keyLen = part.length;
+        }
       }
     }
   }
 
-  function findPlayerByText(text) {
+  function findPlayerInText(text) {
     if (!text) return null;
     const n = normName(text);
-    for (const [surname, player] of Object.entries(playersByName)) {
-      if (n.includes(surname)) return player;
+    let best = null, bestLen = 0;
+    for (const [key, player] of Object.entries(playersByName)) {
+      if (key.length >= 3 && n.includes(key) && key.length > bestLen) {
+        best = player;
+        bestLen = key.length;
+      }
     }
-    return null;
+    return best;
   }
 
-  // Apply events to players
-  for (const evt of events) {
-    if (evt.type === 'goal') {
-      const p = findPlayerByText(evt.player);
-      if (p) p.goals++;
-    } else if (evt.type === 'yellowCard') {
-      const p = findPlayerByText(evt.player);
-      if (p) p.yellowCards++;
-    } else if (evt.type === 'redCard') {
-      const p = findPlayerByText(evt.player);
-      if (p) p.redCards++;
-    } else if (evt.type === 'substitution') {
-      const pOut = findPlayerByText(evt.playerOut);
-      const pIn = findPlayerByText(evt.playerIn);
-      const min = evt.minute || 0;
-      if (pOut && pOut.starter && min > 0) {
-        pOut.minutes = min;
+  function extractMinute(text) {
+    // FFF concatenation: "45inscrit", "45JIMMY" — digits right before a letter
+    let m = text.match(/(\d{1,3})(?:\+(\d{1,2}))?(?=[A-Za-zÀ-ÿ])/);
+    if (m) {
+      const min = parseInt(m[1]) + (m[2] ? parseInt(m[2]) : 0);
+      if (min >= 1 && min <= 130) return min;
+    }
+    // Fallback: digits with prime/apostrophe mark
+    m = text.match(/(\d{1,3})\s*[''′']/);
+    if (m && parseInt(m[1]) >= 1 && parseInt(m[1]) <= 130) return parseInt(m[1]);
+    return 0;
+  }
+
+  // Classify events and apply to our players
+  const appliedEvents = [];
+  for (const text of rawEventTexts) {
+    const minute = extractMinute(text);
+
+    if (/inscrit\s*par|buteur/i.test(text) || (/\bbut\b/i.test(text) && !/remplace|changement/i.test(text))) {
+      // ⚽ Goal — prefer text after "inscrit par" for player matching
+      const parts = text.split(/inscrit\s*par/i);
+      const scorer = parts.length > 1 ? findPlayerInText(parts[parts.length - 1]) : findPlayerInText(text);
+      if (scorer) {
+        scorer.goals++;
+        appliedEvents.push(`⚽ ${minute}' ${scorer.name}`);
       }
-      if (pIn) {
-        pIn.starter = false;
-        pIn.minutes = min > 0 ? (90 - min) : 0;
+      // Check for assist in same event
+      const am = text.match(/pass(?:eur|e)\s+d[ée]cisiv[eo]?\s*(?:de|:)?\s*(.*)/i);
+      if (am) {
+        const assister = findPlayerInText(am[1]);
+        if (assister) { assister.assists++; appliedEvents.push(`🅰️ PD: ${assister.name}`); }
       }
-    } else if (evt.type === 'raw') {
-      const p = findPlayerByText(evt.text);
-      if (p) {
-        if (/but/i.test(evt.text)) p.goals++;
-        else if (/jaune|avertiss/i.test(evt.text)) p.yellowCards++;
-        else if (/rouge/i.test(evt.text)) p.redCards++;
+
+    } else if ((/est\s+averti|avertissement|carton\s+jaune/i.test(text)) && !/exclu|rouge/i.test(text)) {
+      // 🟡 Yellow card
+      const player = findPlayerInText(text);
+      if (player) {
+        player.yellowCards++;
+        appliedEvents.push(`🟡 ${minute}' ${player.name}`);
+      }
+
+    } else if (/est\s+exclu|carton\s+rouge/i.test(text)) {
+      // 🔴 Red card
+      const player = findPlayerInText(text);
+      if (player) {
+        player.redCards++;
+        appliedEvents.push(`🔴 ${minute}' ${player.name}`);
+      }
+
+    } else if (/remplace/i.test(text)) {
+      // 🔄 Substitution — split at "remplace" to identify in/out
+      const parts = text.split(/remplace/i);
+      const playerIn = findPlayerInText(parts[0]);
+      const playerOut = parts.length > 1 ? findPlayerInText(parts[1]) : null;
+      if (playerOut && minute > 0) playerOut.minutes = minute;
+      if (playerIn && minute > 0) playerIn.minutes = 90 - minute;
+      if (playerIn || playerOut)
+        appliedEvents.push(`🔄 ${minute}' ${playerIn ? playerIn.name : '?'} ← ${playerOut ? playerOut.name : '?'}`);
+
+    } else if (/pass(?:eur|e)\s+d[ée]cisiv/i.test(text)) {
+      // 🅰️ Standalone assist event
+      const player = findPlayerInText(text);
+      if (player) {
+        player.assists++;
+        appliedEvents.push(`🅰️ PD: ${player.name}`);
       }
     }
   }
+
+  if (isFirst) {
+    console.log(`   ✅ ${appliedEvents.length} événements appliqués:`);
+    for (const e of appliedEvents) console.log(`      ${e}`);
+  }
+  // Cleanup temp property
+  for (const p of players) delete p._keyLen;
 
   if (players.length === 0) return null;
 
@@ -508,7 +534,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     venue: isHome ? 'Domicile' : 'Extérieur',
     opponent,
     players,
-    rawEvents: events
+    rawEvents: rawEventTexts
   };
 }
 
