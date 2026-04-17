@@ -2,17 +2,11 @@
 /* =============================================================
    Scraper FlashScore — US Orléans (National)
 
+   Filtre : matchs de championnat National, journée 30+
+
    Usage :
-     npm install                          # la première fois
-     node scripts/scrape-flashscore.js    # après chaque journée
-
-   Ce script :
-   1. Ouvre FlashScore National dans Chrome (non-headless)
-   2. Trouve les matchs d'US Orléans
-   3. Pour chaque match non encore importé, ouvre la page détail
-   4. Extrait composition, minutes, buts, passes D, cartons
-   5. Génère un fichier JSON importable dans l'app
-
+     npm install
+     npm run scrape-flashscore
    ============================================================= */
 
 const puppeteer = require('puppeteer-extra');
@@ -23,11 +17,14 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT_DIR = path.join(ROOT, 'imports');
-const PROFILE_DIR = path.join(ROOT, '.cache', 'flashscore-profile');
-[OUTPUT_DIR, PROFILE_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
+const DEBUG_DIR = path.join(ROOT, '.cache', 'debug');
+[OUTPUT_DIR, DEBUG_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
-const TEAM_KEYWORDS = ['orl\u00e9ans', 'orleans'];
 const RESULTS_URL = 'https://www.flashscore.fr/equipe/orleans/AqswAEFD/resultats/';
+const TEAM_KEYWORDS = ['orléans', 'orleans'];
+const MIN_MATCHDAY = 30;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function matchesTeam(text) {
   if (!text) return false;
@@ -35,43 +32,22 @@ function matchesTeam(text) {
   return TEAM_KEYWORDS.some(k => low.includes(k));
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise(r => {
-      let total = 0;
-      const timer = setInterval(() => {
-        window.scrollBy(0, 300);
-        total += 300;
-        if (total >= document.body.scrollHeight) { clearInterval(timer); r(); }
-      }, 200);
-      setTimeout(() => { clearInterval(timer); r(); }, 5000);
-    });
-  });
-}
-
 async function main() {
-  console.log('\n\u{1F680} Lancement de Chrome (stealth mode)...');
+  console.log('\n🚀 Lancement de Chrome (stealth)...');
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
     args: ['--start-maximized', '--no-sandbox']
   });
-
   const page = (await browser.pages())[0];
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   });
 
-  // --- Étape 1 : page d'accueil pour accepter les cookies ---
-  console.log('\u{1F310} Ouverture de FlashScore...');
+  // Accept cookies
+  console.log('🌐 Ouverture FlashScore...');
   await page.goto('https://www.flashscore.fr/', { waitUntil: 'networkidle2', timeout: 30000 });
   await sleep(3000);
-
-  // Accepte les cookies (plusieurs sélecteurs possibles)
   for (const sel of ['#onetrust-accept-btn-handler', '[id*="accept"]', 'button[class*="accept"]']) {
     try {
       const btn = await page.$(sel);
@@ -79,351 +55,595 @@ async function main() {
     } catch (_) {}
   }
 
-  // --- Étape 2 : naviguer vers les résultats US Orléans ---
-  console.log('\u{1F310} Chargement résultats US Orléans...');
+  // Navigate to results
+  console.log('🌐 Résultats US Orléans...');
   await page.goto(RESULTS_URL, { waitUntil: 'networkidle2', timeout: 30000 });
   await sleep(5000);
 
-  // Scroll pour charger plus de matchs
-  await autoScroll(page);
-  await sleep(2000);
+  // Click "Show more" to load earlier matches
+  for (let i = 0; i < 10; i++) {
+    const clicked = await page.evaluate(() => {
+      const btns = document.querySelectorAll('a[class*="event__more"], [class*="showMore"], [class*="more"]');
+      for (const b of btns) {
+        const t = b.textContent.toLowerCase();
+        if (t.includes('plus') || t.includes('more') || t.includes('afficher')) {
+          b.click();
+          return true;
+        }
+      }
+      return false;
+    });
+    if (!clicked) break;
+    await sleep(2000);
+  }
 
-  // Sauvegarde debug
-  const debugDir = path.join(ROOT, '.cache', 'debug');
-  fs.mkdirSync(debugDir, { recursive: true });
-  await page.screenshot({ path: path.join(debugDir, 'flashscore-page.png'), fullPage: true });
-  console.log(`📸 Screenshot: .cache/debug/flashscore-page.png`);
+  await page.screenshot({ path: path.join(DEBUG_DIR, 'results-page.png'), fullPage: true });
 
-  // Dump un extrait du body HTML pour debug
-  const bodySnippet = await page.evaluate(() => {
-    const body = document.body;
-    if (!body) return '(no body)';
-    return body.innerHTML.slice(0, 2000);
-  });
-  fs.writeFileSync(path.join(debugDir, 'flashscore-body.html'), bodySnippet);
-  console.log(`📄 HTML dump: .cache/debug/flashscore-body.html`);
-  console.log(`📌 URL actuelle: ${page.url()}`);
-  console.log(`📌 Titre page: ${await page.title()}`);
+  // Extract matches with competition headers
+  const matches = await page.evaluate(() => {
+    const results = [];
+    const rows = document.querySelectorAll('[id^="g_"]');
 
-  // Dump la structure des éléments pour debug
-  const pageStructure = await page.evaluate(() => {
-    const result = [];
-    // Cherche tous les éléments avec un id commençant par "g_"
-    const byId = document.querySelectorAll('[id^="g_"]');
-    result.push({ method: 'id^=g_', count: byId.length });
-    // Cherche par classes connues (variantes FlashScore)
-    const selectors = [
-      '[class*="event__match"]', '[class*="sportName"]',
-      '[class*="participant"]', '[class*="event__"]',
-      'a[href*="/match/"]', '[class*="rows"]'
-    ];
-    for (const sel of selectors) {
-      const els = document.querySelectorAll(sel);
-      result.push({ selector: sel, count: els.length });
-    }
-    // Récupère les liens vers des matchs
-    const matchLinks = document.querySelectorAll('a[href*="/match/"]');
-    const linkSample = Array.from(matchLinks).slice(0, 5).map(a => ({
-      href: a.getAttribute('href'),
-      text: a.textContent.trim().slice(0, 80)
-    }));
-    result.push({ matchLinkSamples: linkSample });
-    return result;
-  });
-  console.log('🔍 Structure page:', JSON.stringify(pageStructure, null, 2));
-
-  // --- Extraction des matchs : stratégie multi-sélecteurs ---
-  const matchLinks = await page.evaluate(() => {
-    const links = [];
-    const seen = new Set();
-
-    // Stratégie 1 : éléments avec id "g_X_MATCHID"
-    document.querySelectorAll('[id^="g_"]').forEach(row => {
+    rows.forEach(row => {
       const id = row.id || '';
       const matchId = id.replace(/^g_\d+_/, '');
-      if (!matchId || seen.has(matchId)) return;
-      seen.add(matchId);
-      const text = row.textContent || '';
-      const homeEl = row.querySelector('[class*="participant--home"], [class*="homeParticipant"]');
-      const awayEl = row.querySelector('[class*="participant--away"], [class*="awayParticipant"]');
+      if (!matchId) return;
+
+      const homeEl = row.querySelector('[class*="participant--home"], [class*="homeParticipant"], [class*="participant__home"]');
+      const awayEl = row.querySelector('[class*="participant--away"], [class*="awayParticipant"], [class*="participant__away"]');
       const home = homeEl ? homeEl.textContent.trim() : '';
       const away = awayEl ? awayEl.textContent.trim() : '';
+
       const scoreEls = row.querySelectorAll('[class*="score"], [class*="Score"]');
       const scores = Array.from(scoreEls).map(e => e.textContent.trim()).filter(s => /^\d+$/.test(s));
-      const timeEl = row.querySelector('[class*="time"], [class*="Time"]');
-      links.push({
-        matchId, home, away,
+
+      const timeEl = row.querySelector('[class*="time"], [class*="Time"], [class*="date"]');
+      const linkEl = row.querySelector('a[href*="/match/"]');
+      const href = linkEl ? linkEl.getAttribute('href') : '';
+
+      // Find competition header above this match
+      let competition = '';
+      let el = row.previousElementSibling;
+      while (el) {
+        const cls = el.className || '';
+        const txt = el.textContent || '';
+        if (/header/i.test(cls)) {
+          competition = txt.trim();
+          break;
+        }
+        if (el.id && el.id.startsWith('g_')) break;
+        el = el.previousElementSibling;
+      }
+
+      results.push({
+        matchId, home, away, href,
         scoreHome: scores[0] || '', scoreAway: scores[1] || '',
-        time: timeEl ? timeEl.textContent.trim() : ''
+        time: timeEl ? timeEl.textContent.trim() : '',
+        competition
       });
     });
 
-    // Stratégie 2 : liens <a> vers /match/XXXX/
-    if (links.length === 0) {
-      document.querySelectorAll('a[href*="/match/"]').forEach(a => {
-        const href = a.getAttribute('href') || '';
-        const m = href.match(/\/match\/([A-Za-z0-9]+)\//);
-        if (!m || seen.has(m[1])) return;
-        seen.add(m[1]);
-        const row = a.closest('[class*="event"]') || a.closest('div') || a;
-        const text = row.textContent.trim();
-        links.push({
-          matchId: m[1], home: '', away: '',
-          scoreHome: '', scoreAway: '',
-          time: '', rawText: text.slice(0, 120)
-        });
-      });
-    }
-
-    // Stratégie 3 : sélecteurs génériques FlashScore
-    if (links.length === 0) {
-      const rows = document.querySelectorAll('[class*="event__match"], [class*="sportName__match"]');
-      rows.forEach(row => {
-        const id = row.id || '';
-        const matchId = id.replace(/^g_\d+_/, '') || ('row_' + Math.random().toString(36).slice(2, 8));
-        if (seen.has(matchId)) return;
-        seen.add(matchId);
-        links.push({
-          matchId, home: '', away: '',
-          scoreHome: '', scoreAway: '',
-          time: '', rawText: (row.textContent || '').trim().slice(0, 120)
-        });
-      });
-    }
-
-    return links;
+    return results;
   });
 
-  console.log(`\u{1F4CB} ${matchLinks.length} match(s) trouvés sur la page.`);
+  console.log(`📋 ${matches.length} match(s) trouvés au total.`);
 
-  if (matchLinks.length === 0) {
-    console.log('\n\u26A0\uFE0F Aucun match trouvé. FlashScore a peut-être changé sa structure.');
-    console.log('Essayez de naviguer manuellement dans la fenêtre Chrome ouverte.');
-    await waitForClose(browser);
-    return;
+  // Filter: only National championship (exclude Coupe, amicaux, etc.)
+  let pool = matches.filter(m => {
+    const comp = m.competition.toLowerCase();
+    return comp.includes('national') && !comp.includes('coupe');
+  });
+
+  if (pool.length === 0) {
+    console.log('⚠️  Pas de filtre compétition trouvé (headers vides), utilisation de tous les matchs.');
+    pool = matches;
+  } else {
+    console.log(`🏟️  ${pool.length} match(s) de National (hors coupes).`);
   }
 
-  // Affiche les matchs trouvés
-  matchLinks.forEach((m, i) => {
-    console.log(`  ${i + 1}. ${m.time} | ${m.home} ${m.scoreHome} - ${m.scoreAway} ${m.away}`);
+  // National season has 34 matchdays. We want matchday 30+, so the 5 most recent.
+  // Results page is ordered most-recent-first.
+  // Take matchdays 30-34 = last 5 of the season.
+  // We take a reasonable slice from the most recent matches.
+  const totalMatchdays = 34;
+  const wantedCount = totalMatchdays - MIN_MATCHDAY + 1; // 5
+  const toProcess = pool.slice(0, wantedCount);
+
+  console.log(`\n🎯 ${toProcess.length} match(s) à traiter (journées ${MIN_MATCHDAY}–${totalMatchdays}) :`);
+  toProcess.forEach((m, i) => {
+    console.log(`  ${i + 1}. ${m.time} ${m.home} ${m.scoreHome}-${m.scoreAway} ${m.away}`);
   });
 
-  // --- Pour chaque match, extraire les détails ---
+  // Process each match
   const allResults = [];
-  for (let i = 0; i < matchLinks.length; i++) {
-    const m = matchLinks[i];
-    console.log(`\n\u{1F50D} [${i + 1}/${matchLinks.length}] ${m.home} vs ${m.away}...`);
+  for (let i = 0; i < toProcess.length; i++) {
+    const m = toProcess[i];
+    const label = `${m.home || '?'} vs ${m.away || '?'}`;
+    console.log(`\n🔍 [${i + 1}/${toProcess.length}] ${label}...`);
 
     try {
-      const detail = await scrapeMatchDetail(page, m.matchId);
+      const detail = await scrapeMatchDetail(page, m, i === 0);
       if (detail) {
         detail.home = m.home;
         detail.away = m.away;
         detail.scoreHome = m.scoreHome;
         detail.scoreAway = m.scoreAway;
         allResults.push(detail);
-        console.log(`   \u2705 ${detail.players.length} joueurs extraits`);
+        console.log(`   ✅ ${detail.players.length} joueurs Orléans extraits`);
       } else {
-        console.log('   \u26A0\uFE0F Pas de composition trouvée');
+        console.log('   ⚠️ Pas de données trouvées');
       }
     } catch (err) {
-      console.log(`   \u274C Erreur: ${err.message}`);
+      console.log(`   ❌ Erreur: ${err.message}`);
     }
   }
 
-  // --- Sauvegarde ---
+  // Save results
   if (allResults.length > 0) {
     const stamp = new Date().toISOString().slice(0, 10);
     const outFile = path.join(OUTPUT_DIR, `flashscore-orleans-${stamp}.json`);
     fs.writeFileSync(outFile, JSON.stringify(allResults, null, 2));
-    console.log(`\n\u2705 ${allResults.length} match(s) extraits : ${outFile}`);
-    console.log('\u{1F449} Importez ce fichier dans l\'app via "Importer FlashScore".');
+    console.log(`\n✅ ${allResults.length} match(s) extraits : ${outFile}`);
+    console.log('👉 Importez ce fichier dans l\'app via "⚡ Importer FlashScore".');
   } else {
-    console.log('\n\u26A0\uFE0F Aucune donnée extraite.');
+    console.log('\n⚠️ Aucune donnée extraite.');
   }
 
   console.log('\n(Fermez Chrome pour terminer)');
-  await waitForClose(browser);
+  await new Promise(r => browser.on('disconnected', r));
 }
 
-async function scrapeMatchDetail(page, matchId) {
-  const url = `https://www.flashscore.fr/match/${matchId}/`;
+async function scrapeMatchDetail(page, match, isFirst) {
+  let url = match.href;
+  if (!url) url = `/match/${match.matchId}/`;
+  if (url.startsWith('/')) url = 'https://www.flashscore.fr' + url;
 
-  // --- Onglet Compositions ---
-  await page.goto(url + '#/compositions', { waitUntil: 'networkidle2', timeout: 20000 });
+  const isHome = matchesTeam(match.home);
+  const ourSide = isHome ? 'home' : 'away';
+
+  // Capture API/XHR responses for this match detail
+  const captured = [];
+  const responseHandler = async (response) => {
+    try {
+      const resUrl = response.url();
+      // Capture anything that looks like match data
+      if (resUrl.includes(match.matchId) || /lineup|summary|incident|statistic|match/i.test(resUrl)) {
+        const text = await response.text();
+        if (text && text.length > 10) {
+          captured.push({ url: resUrl, body: text.slice(0, 50000) });
+        }
+      }
+    } catch (_) {}
+  };
+  page.on('response', responseHandler);
+
+  // --- Compositions tab ---
+  await page.goto(url + '#/compositions', { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(4000);
+  await clickTab(page, ['compo', 'lineup', 'compositions']);
   await sleep(2000);
 
-  // Essaye de cliquer sur l'onglet "Compositions" si pas chargé
+  if (isFirst) {
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'match-compo.png'), fullPage: true });
+    const html = await page.evaluate(() => document.body.innerHTML);
+    fs.writeFileSync(path.join(DEBUG_DIR, 'match-compo.html'), html);
+    console.log('   📸 Debug compo: .cache/debug/match-compo.png');
+
+    const probes = await page.evaluate(() => {
+      const sels = [
+        '[class*="lineupTable"]', '[class*="lineup"]', '[class*="Lineup"]',
+        '[class*="lf__"]', '[class*="formation"]', '[class*="player"]',
+        '[class*="Player"]', '[class*="participant"]', '[class*="section"]',
+        '[class*="soccer"]', '[class*="pitch"]', '[class*="cell"]',
+        '[class*="row"]', '[class*="name"]', '[class*="jersey"]',
+        '[class*="shirt"]', '[class*="starting"]', '[class*="bench"]',
+        '[class*="substitut"]', 'table', 'li'
+      ];
+      return sels.map(s => {
+        const els = document.querySelectorAll(s);
+        const samples = Array.from(els).slice(0, 3).map(e => ({
+          tag: e.tagName, cls: (e.className || '').toString().slice(0, 80),
+          text: e.textContent.trim().slice(0, 60)
+        }));
+        return { sel: s, count: els.length, samples };
+      }).filter(x => x.count > 0);
+    });
+    console.log('   🔍 Sélecteurs compo:', JSON.stringify(probes, null, 2));
+  }
+
+  const lineups = await extractLineup(page);
+  if (isFirst) console.log(`   📊 DOM lineup: ${lineups.length} joueurs`);
+
+  // --- Résumé tab ---
+  await page.goto(url + '#/resume-du-match/resume-du-match', { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(3000);
+  await clickTab(page, ['résum', 'summary', 'résumé']);
+  await sleep(2000);
+
+  if (isFirst) {
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'match-resume.png'), fullPage: true });
+    const html = await page.evaluate(() => document.body.innerHTML);
+    fs.writeFileSync(path.join(DEBUG_DIR, 'match-resume.html'), html);
+    console.log('   📸 Debug résumé: .cache/debug/match-resume.png');
+  }
+
+  const events = await extractEvents(page);
+  if (isFirst) console.log(`   📊 DOM events: ${events.length} événements`);
+
+  // Stop capturing
+  page.off('response', responseHandler);
+
+  // Save all captured network data for debug
+  if (isFirst) {
+    fs.writeFileSync(path.join(DEBUG_DIR, 'api-captured.json'), JSON.stringify(captured, null, 2));
+    console.log(`   📡 ${captured.length} réponses réseau capturées`);
+  }
+
+  // Try to parse lineup from captured API responses if DOM extraction failed
+  let apiLineups = [];
+  let apiEvents = [];
+  if (lineups.length === 0 || events.length === 0) {
+    const parsed = parseApiResponses(captured, match.matchId);
+    apiLineups = parsed.lineups;
+    apiEvents = parsed.events;
+    if (isFirst) console.log(`   📡 API lineup: ${apiLineups.length}, events: ${apiEvents.length}`);
+  }
+
+  const finalLineups = lineups.length > 0 ? lineups : apiLineups;
+  const finalEvents = events.length > 0 ? events : apiEvents;
+
+  // Extract match date
+  const matchDate = await page.evaluate(() => {
+    const el = document.querySelector('[class*="startTime"], [class*="duelParticipant__startTime"]');
+    if (el) return el.textContent.trim();
+    const header = document.querySelector('[class*="duelParticipant"], [class*="tournamentHeader"]');
+    return header ? header.textContent.trim().slice(0, 50) : '';
+  });
+
+  // Extract round info
+  const roundInfo = await page.evaluate(() => {
+    const el = document.querySelector('[class*="tournamentHeader__country"], [class*="tournamentHeader"]');
+    return el ? el.textContent.trim() : '';
+  });
+
+  if (finalLineups.length === 0 && finalEvents.length === 0) return null;
+
+  const ourLineup = finalLineups.filter(p => p.team === ourSide || p.team === 'unknown');
+  const players = buildPlayerList(ourLineup, finalEvents, ourSide);
+
+  return {
+    matchId: match.matchId,
+    date: parseFlashscoreDate(matchDate),
+    round: roundInfo,
+    players,
+    rawEvents: finalEvents
+  };
+}
+
+async function clickTab(page, keywords) {
   try {
-    const tabs = await page.$$('[class*="tabs__tab"]');
-    for (const tab of tabs) {
-      const text = await tab.evaluate(el => el.textContent.trim().toLowerCase());
-      if (text.includes('compo') || text.includes('lineup')) {
-        await tab.click();
-        await sleep(1500);
-        break;
+    const clicked = await page.evaluate((kws) => {
+      const candidates = document.querySelectorAll('a, button, [role="tab"], [class*="tab"], [class*="Tab"], li');
+      for (const el of candidates) {
+        const text = el.textContent.trim().toLowerCase();
+        for (const kw of kws) {
+          if (text.includes(kw) && text.length < 30) {
+            el.click();
+            return text;
+          }
+        }
+      }
+      return null;
+    }, keywords);
+    if (clicked) console.log(`   📌 Onglet: "${clicked}"`);
+  } catch (_) {}
+}
+
+async function extractLineup(page) {
+  return await page.evaluate(() => {
+    const players = [];
+    const seen = new Set();
+
+    // Strategy 1: FlashScore lineup elements (many possible class name patterns)
+    const selectors = [
+      '[class*="lf__cell"]', '[class*="lineup__player"]', '[class*="lineupTable"]',
+      '[class*="formation__player"]', '[class*="smv__participantRow"]',
+      '[class*="participant__row"]', '[class*="Player"]',
+      '[class*="jersey"]', '[class*="shirt"]'
+    ];
+
+    for (const sel of selectors) {
+      const els = document.querySelectorAll(sel);
+      for (const el of els) {
+        const nameEl = el.querySelector('a, [class*="name"], [class*="Name"], [class*="participant"]');
+        const numberEl = el.querySelector('[class*="jersey"], [class*="number"], [class*="Number"], [class*="shirt"]');
+        const name = nameEl ? nameEl.textContent.trim() : '';
+        const number = numberEl ? numberEl.textContent.trim().replace(/[^\d]/g, '') : '';
+
+        if (!name || name.length > 40 || name.length < 2 || seen.has(name)) continue;
+        seen.add(name);
+
+        let team = detectSide(el);
+        players.push({ name, number, team, starter: true });
       }
     }
-  } catch (_) {}
 
-  // Extraction des joueurs depuis la page compositions
-  const lineups = await page.evaluate(() => {
-    const players = [];
+    // Strategy 2: Look for table rows with player data
+    if (players.length === 0) {
+      const trs = document.querySelectorAll('table tr, [class*="table"] [class*="row"]');
+      for (const tr of trs) {
+        const cells = tr.querySelectorAll('td, [class*="cell"]');
+        if (cells.length < 2) continue;
+        const text0 = cells[0]?.textContent.trim() || '';
+        const text1 = cells[1]?.textContent.trim() || '';
+        const maybeNumber = /^\d{1,2}$/.test(text0);
+        const maybeName = text1.length >= 2 && text1.length <= 40 && !/^\d+$/.test(text1);
+        if (maybeNumber && maybeName && !seen.has(text1)) {
+          seen.add(text1);
+          players.push({ name: text1, number: text0, team: detectSide(tr), starter: true });
+        }
+      }
+    }
 
-    // FlashScore lineup sections
-    const sections = document.querySelectorAll('[class*="lf__side"], [class*="lineup--home"], [class*="lineup--away"], [class*="section"]');
+    // Strategy 3: Look for any list-like structures with numbered items (shirt numbers)
+    if (players.length === 0) {
+      const allElements = document.querySelectorAll('div, span, li');
+      const numberPattern = /^(\d{1,2})$/;
+      for (const el of allElements) {
+        const text = el.textContent.trim();
+        if (text.length < 2 || text.length > 50) continue;
+        // Match "Number Name" pattern like "7 Sylla"
+        const m = text.match(/^(\d{1,2})\s+([A-ZÀ-Ý][a-zà-ÿ\-']+(?:\s+[A-ZÀ-Ý][a-zà-ÿ\-']+)*)$/);
+        if (m && !seen.has(m[2])) {
+          seen.add(m[2]);
+          players.push({ name: m[2], number: m[1], team: detectSide(el), starter: true });
+        }
+      }
+    }
 
-    // Méthode générique : cherche tous les éléments qui ressemblent à des joueurs
-    const allPlayerEls = document.querySelectorAll(
-      '[class*="lf__cell"], [class*="lineup-player"], [class*="smv__participantRow"]'
-    );
-
-    for (const el of allPlayerEls) {
-      const name = el.querySelector('[class*="participantName"], [class*="lf__name"], [class*="name"]');
-      const number = el.querySelector('[class*="jersey"], [class*="number"], [class*="lf__no"]');
-      if (!name) continue;
-
-      // Détermine l'équipe (home/away) en remontant dans le DOM
-      let team = 'unknown';
+    function detectSide(el) {
       let parent = el;
-      for (let depth = 0; depth < 10; depth++) {
+      for (let d = 0; d < 20; d++) {
         parent = parent.parentElement;
         if (!parent) break;
-        const cls = parent.className || '';
-        if (/home|--1|left/i.test(cls)) { team = 'home'; break; }
-        if (/away|--2|right/i.test(cls)) { team = 'away'; break; }
+        const cls = (parent.className || '').toString() + ' ' + (parent.id || '');
+        if (/home|--1|left|__1/i.test(cls)) return 'home';
+        if (/away|--2|right|__2/i.test(cls)) return 'away';
       }
-
-      players.push({
-        name: name.textContent.trim(),
-        number: number ? number.textContent.trim().replace(/[^\d]/g, '') : '',
-        team
-      });
+      return 'unknown';
     }
 
     return players;
   });
-
-  // --- Onglet Résumé (buts, cartons, remplacements) ---
-  await page.goto(url + '#/resume-du-match', { waitUntil: 'networkidle2', timeout: 20000 });
-  await sleep(1500);
-
-  // Essaye aussi "#/resume"
-  try {
-    const tabs = await page.$$('[class*="tabs__tab"]');
-    for (const tab of tabs) {
-      const text = await tab.evaluate(el => el.textContent.trim().toLowerCase());
-      if (text.includes('résum') || text.includes('summary') || text.includes('resume')) {
-        await tab.click();
-        await sleep(1500);
-        break;
-      }
-    }
-  } catch (_) {}
-
-  const events = await page.evaluate(() => {
-    const evts = [];
-    const rows = document.querySelectorAll(
-      '[class*="smv__incident"], [class*="event__incident"], [class*="incident"]'
-    );
-
-    for (const row of rows) {
-      const text = row.textContent.trim();
-      const timeEl = row.querySelector('[class*="time"], [class*="minute"]');
-      const time = timeEl ? timeEl.textContent.trim() : '';
-
-      // Type d'événement par icône/classe
-      const cls = (row.innerHTML || '').toLowerCase();
-      let type = 'unknown';
-      if (/goal|but|soccer-ball|footballGoal/.test(cls)) type = 'goal';
-      else if (/yellowcard|yellow-card|carton.*jaune|y-card/.test(cls)) type = 'yellowCard';
-      else if (/redcard|red-card|carton.*rouge|r-card/.test(cls)) type = 'redCard';
-      else if (/substitution|remplacement|sub-in|sub-out/.test(cls)) type = 'substitution';
-      else if (/assist|passe/.test(cls)) type = 'assist';
-
-      // Nom du joueur
-      const nameEl = row.querySelector('[class*="participantName"], [class*="name"], a');
-      const name = nameEl ? nameEl.textContent.trim() : '';
-
-      // Côté (home/away)
-      let team = 'unknown';
-      let parent = row;
-      for (let d = 0; d < 10; d++) {
-        parent = parent.parentElement;
-        if (!parent) break;
-        const c = parent.className || '';
-        if (/home|--1|left/i.test(c)) { team = 'home'; break; }
-        if (/away|--2|right/i.test(c)) { team = 'away'; break; }
-      }
-
-      evts.push({ type, name, time, team, text: text.slice(0, 100) });
-    }
-    return evts;
-  });
-
-  // --- Extraction date depuis la page ---
-  const matchDate = await page.evaluate(() => {
-    const el = document.querySelector('[class*="startTime"], [class*="duelParticipant__startTime"]');
-    return el ? el.textContent.trim() : '';
-  });
-
-  if (lineups.length === 0) return null;
-
-  // --- Consolidation ---
-  const players = buildPlayerList(lineups, events);
-
-  return {
-    matchId,
-    date: parseFlashscoreDate(matchDate),
-    players,
-    rawEvents: events
-  };
 }
 
-function buildPlayerList(lineups, events) {
+async function extractEvents(page) {
+  return await page.evaluate(() => {
+    const evts = [];
+    const processed = new Set();
+
+    const selectors = [
+      '[class*="smv__incident"]', '[class*="incident"]',
+      '[class*="event__incident"]', '[class*="verticalSections"]'
+    ];
+
+    for (const sel of selectors) {
+      const rows = document.querySelectorAll(sel);
+      for (const row of rows) {
+        const text = row.textContent.trim();
+        if (!text || text.length > 300 || processed.has(text)) continue;
+        processed.add(text);
+
+        const innerHTML = (row.innerHTML || '').toLowerCase();
+        let type = 'unknown';
+
+        if (/goal|soccer-ball|footballGoal|iconGoal|icon-goal/i.test(innerHTML)) type = 'goal';
+        else if (/yellowCard|yellow-card|y-card|iconYellowCard/i.test(innerHTML)) type = 'yellowCard';
+        else if (/redCard|red-card|r-card|iconRedCard/i.test(innerHTML)) type = 'redCard';
+        else if (/substitut|iconSubstitution|sub-in|sub-out/i.test(innerHTML)) type = 'substitution';
+        else if (/assist|iconAssist/i.test(innerHTML)) type = 'assist';
+
+        // Also detect by looking at SVG/img src or class
+        if (type === 'unknown') {
+          const icons = row.querySelectorAll('svg, img, [class*="icon"], [class*="Icon"]');
+          for (const icon of icons) {
+            const src = (icon.getAttribute('src') || '') + ' ' + (icon.getAttribute('xlink:href') || '') + ' ' + (icon.className || '');
+            if (/goal|soccer|football/i.test(src)) type = 'goal';
+            else if (/yellow/i.test(src)) type = 'yellowCard';
+            else if (/red/i.test(src)) type = 'redCard';
+            else if (/subst|change/i.test(src)) type = 'substitution';
+          }
+        }
+
+        if (type === 'unknown') continue;
+
+        const timeMatch = text.match(/(\d+)['′+]/);
+        const minute = timeMatch ? parseInt(timeMatch[1]) : 0;
+
+        const nameEl = row.querySelector('[class*="name"], [class*="Name"], a');
+        const name = nameEl ? nameEl.textContent.trim() : '';
+
+        // For assists, look for secondary name
+        let assistName = '';
+        if (type === 'goal') {
+          const assistEl = row.querySelector('[class*="assist"], [class*="subIncident"]');
+          if (assistEl) assistName = assistEl.textContent.trim().replace(/^\(|\)$/g, '');
+        }
+
+        let team = 'unknown';
+        let parent = row;
+        for (let d = 0; d < 10; d++) {
+          parent = parent.parentElement;
+          if (!parent) break;
+          const cls = (parent.className || '').toString();
+          if (/home|--1|left/i.test(cls)) { team = 'home'; break; }
+          if (/away|--2|right/i.test(cls)) { team = 'away'; break; }
+        }
+
+        evts.push({ type, name, assistName, minute, team, text: text.slice(0, 120) });
+      }
+    }
+
+    return evts;
+  });
+}
+
+function parseApiResponses(captured, matchId) {
+  const lineups = [];
+  const events = [];
+
+  for (const resp of captured) {
+    const body = resp.body;
+
+    // Try to parse as JSON
+    try {
+      const data = JSON.parse(body);
+      // Look for lineup data
+      if (data.lineups || data.lineup || data.formations) {
+        const raw = data.lineups || data.lineup || data.formations;
+        if (Array.isArray(raw)) {
+          for (const p of raw) {
+            const name = p.name || p.playerName || p.shortName || '';
+            if (name) {
+              lineups.push({
+                name, number: String(p.jerseyNumber || p.number || ''),
+                team: p.side || p.team || 'unknown', starter: p.substitute !== true
+              });
+            }
+          }
+        }
+      }
+
+      // Look for incident/event data
+      if (data.incidents || data.events || data.summary) {
+        const raw = data.incidents || data.events || data.summary;
+        if (Array.isArray(raw)) {
+          for (const e of raw) {
+            const name = e.playerName || e.player?.name || e.name || '';
+            let type = 'unknown';
+            const t = (e.type || e.incidentType || '').toLowerCase();
+            if (t.includes('goal')) type = 'goal';
+            else if (t.includes('yellow')) type = 'yellowCard';
+            else if (t.includes('red')) type = 'redCard';
+            else if (t.includes('subst')) type = 'substitution';
+            if (type !== 'unknown') {
+              events.push({
+                type, name, minute: e.time || e.minute || 0,
+                team: e.side || e.team || 'unknown',
+                assistName: e.assist?.name || ''
+              });
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Try FlashScore custom text format (pipe-delimited)
+    // FlashScore uses formats like: SA÷1¬~ZA÷EUROPE: ...
+    if (body.includes('÷') || body.includes('¬')) {
+      const parsed = parseFlashscoreTextFormat(body);
+      if (parsed.lineups.length > 0) lineups.push(...parsed.lineups);
+      if (parsed.events.length > 0) events.push(...parsed.events);
+    }
+  }
+
+  return { lineups, events };
+}
+
+function parseFlashscoreTextFormat(text) {
+  const lineups = [];
+  const events = [];
+
+  // FlashScore uses a custom delimiter format:
+  // Fields separated by ¬ (not-sign), key÷value pairs
+  // Player entries often have: ~IA÷matchId¬~IB÷playerName¬~IC÷jerseyNumber...
+  const entries = text.split('~');
+  let current = {};
+
+  for (const entry of entries) {
+    const parts = entry.split('¬');
+    for (const part of parts) {
+      const [key, val] = part.split('÷');
+      if (key && val) current[key] = val;
+    }
+
+    // When we have enough data for a player
+    if (current.IB || current.IN) {
+      const name = current.IB || current.IN || '';
+      if (name && name.length > 1) {
+        lineups.push({
+          name,
+          number: current.IC || current.IJ || '',
+          team: current.IH === '1' ? 'home' : current.IH === '2' ? 'away' : 'unknown',
+          starter: current.IL !== '1'
+        });
+      }
+      current = {};
+    }
+
+    // Incident entries
+    if (current.IA && current.IT) {
+      let type = 'unknown';
+      const t = current.IT;
+      if (t === '1' || t === '7' || t === '9') type = 'goal';
+      else if (t === '3') type = 'yellowCard';
+      else if (t === '4' || t === '5') type = 'redCard';
+      else if (t === '6') type = 'substitution';
+      if (type !== 'unknown') {
+        events.push({
+          type, name: current.IN || current.IB || '',
+          minute: parseInt(current.IM || '0') || 0,
+          team: current.IH === '1' ? 'home' : current.IH === '2' ? 'away' : 'unknown',
+          assistName: current.IA2 || ''
+        });
+      }
+      current = {};
+    }
+  }
+
+  return { lineups, events };
+}
+
+function buildPlayerList(lineups, events, ourSide) {
   const players = lineups.map(p => ({
     name: p.name,
     number: p.number,
-    team: p.team,
-    starter: true, // sera corrigé ci-dessous pour les remplaçants
-    minutes: 90,
+    starter: p.starter !== false,
+    minutes: p.starter !== false ? 90 : 0,
     goals: 0,
     assists: 0,
     yellowCards: 0,
-    redCards: 0,
-    subIn: null,
-    subOut: null
+    redCards: 0
   }));
 
   const byName = {};
   players.forEach(p => { byName[normName(p.name)] = p; });
 
   for (const evt of events) {
+    if (evt.team !== ourSide && evt.team !== 'unknown') continue;
+
     const key = normName(evt.name);
     const p = byName[key];
 
     if (evt.type === 'goal') {
       if (p) p.goals++;
+      // Handle assist
+      if (evt.assistName) {
+        const aKey = normName(evt.assistName);
+        if (byName[aKey]) byName[aKey].assists++;
+      }
     } else if (evt.type === 'yellowCard') {
       if (p) p.yellowCards++;
     } else if (evt.type === 'redCard') {
       if (p) p.redCards++;
-    } else if (evt.type === 'substitution') {
-      const minute = parseInt(evt.time) || 0;
-      // Le texte peut contenir "Joueur A → Joueur B"
-      // Le joueur sortant a subOut = minute, l'entrant a subIn = minute
+    } else if (evt.type === 'substitution' && evt.minute > 0) {
       if (p) {
-        p.subOut = minute;
-        p.minutes = minute;
+        if (p.starter) {
+          p.minutes = evt.minute;
+        } else {
+          p.minutes = 90 - evt.minute;
+        }
       }
-    }
-  }
-
-  // Marque les joueurs qui sont des remplaçants entrés
-  for (const p of players) {
-    if (p.subIn) {
-      p.starter = false;
-      p.minutes = 90 - p.subIn;
     }
   }
 
@@ -436,19 +656,12 @@ function normName(name) {
 
 function parseFlashscoreDate(raw) {
   if (!raw) return '';
-  // Format FlashScore : "08.08.2025 19:30" ou "08/08/2025"
   const m = raw.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})/);
   if (!m) return raw;
   return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
 }
 
-function waitForClose(browser) {
-  return new Promise(resolve => {
-    browser.on('disconnected', resolve);
-  });
-}
-
 main().catch(err => {
-  console.error('\u274C Erreur:', err.message);
+  console.error('❌ Erreur:', err.message);
   process.exit(1);
 });
