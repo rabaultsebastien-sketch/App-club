@@ -169,7 +169,10 @@ async function main() {
         detail.scoreHome = m.scoreHome;
         detail.scoreAway = m.scoreAway;
         allResults.push(detail);
-        console.log(`   ✅ ${detail.players.length} joueurs Orléans extraits`);
+        const g = detail.players.reduce((s, p) => s + p.goals, 0);
+        const c = detail.players.reduce((s, p) => s + p.yellowCards + p.redCards, 0);
+        const a = detail.players.reduce((s, p) => s + p.assists, 0);
+        console.log(`   ✅ ${detail.players.length} joueurs | ${g} but(s), ${a} passe(s) D, ${c} carton(s)`);
       } else {
         console.log('   ⚠️ Pas de données trouvées');
       }
@@ -224,35 +227,16 @@ async function scrapeMatchDetail(page, match, isFirst) {
   await sleep(2000);
 
   if (isFirst) {
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'match-compo.png'), fullPage: true });
-    const html = await page.evaluate(() => document.body.innerHTML);
-    fs.writeFileSync(path.join(DEBUG_DIR, 'match-compo.html'), html);
-    console.log('   📸 Debug compo: .cache/debug/match-compo.png');
-
-    const probes = await page.evaluate(() => {
-      const sels = [
-        '[class*="lineupTable"]', '[class*="lineup"]', '[class*="Lineup"]',
-        '[class*="lf__"]', '[class*="formation"]', '[class*="player"]',
-        '[class*="Player"]', '[class*="participant"]', '[class*="section"]',
-        '[class*="soccer"]', '[class*="pitch"]', '[class*="cell"]',
-        '[class*="row"]', '[class*="name"]', '[class*="jersey"]',
-        '[class*="shirt"]', '[class*="starting"]', '[class*="bench"]',
-        '[class*="substitut"]', 'table', 'li'
-      ];
-      return sels.map(s => {
-        const els = document.querySelectorAll(s);
-        const samples = Array.from(els).slice(0, 3).map(e => ({
-          tag: e.tagName, cls: (e.className || '').toString().slice(0, 80),
-          text: e.textContent.trim().slice(0, 60)
-        }));
-        return { sel: s, count: els.length, samples };
-      }).filter(x => x.count > 0);
-    });
-    console.log('   🔍 Sélecteurs compo:', JSON.stringify(probes, null, 2));
+    try {
+      await page.screenshot({ path: path.join(DEBUG_DIR, 'match-compo.png') });
+      const html = await page.evaluate(() => document.body.innerHTML);
+      fs.writeFileSync(path.join(DEBUG_DIR, 'match-compo.html'), html);
+      console.log('   📸 Debug compo: .cache/debug/match-compo.png');
+    } catch (e) { console.log(`   ⚠️ Debug screenshot compo: ${e.message.slice(0, 80)}`); }
   }
 
   const lineups = await extractLineup(page);
-  if (isFirst) console.log(`   📊 DOM lineup: ${lineups.length} joueurs`);
+  console.log(`   📊 Compo: ${lineups.length} joueurs trouvés`);
 
   // --- Résumé tab ---
   await page.goto(url + '#/resume-du-match/resume-du-match', { waitUntil: 'networkidle2', timeout: 30000 });
@@ -261,22 +245,29 @@ async function scrapeMatchDetail(page, match, isFirst) {
   await sleep(2000);
 
   if (isFirst) {
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'match-resume.png'), fullPage: true });
-    const html = await page.evaluate(() => document.body.innerHTML);
-    fs.writeFileSync(path.join(DEBUG_DIR, 'match-resume.html'), html);
-    console.log('   📸 Debug résumé: .cache/debug/match-resume.png');
+    try {
+      await page.screenshot({ path: path.join(DEBUG_DIR, 'match-resume.png') });
+      const html = await page.evaluate(() => document.body.innerHTML);
+      fs.writeFileSync(path.join(DEBUG_DIR, 'match-resume.html'), html);
+      console.log('   📸 Debug résumé: .cache/debug/match-resume.png');
+    } catch (e) { console.log(`   ⚠️ Debug screenshot résumé: ${e.message.slice(0, 80)}`); }
   }
 
   const events = await extractEvents(page);
-  if (isFirst) console.log(`   📊 DOM events: ${events.length} événements`);
+  const goals = events.filter(e => e.type === 'goal').length;
+  const cards = events.filter(e => e.type === 'yellowCard' || e.type === 'redCard').length;
+  const subs = events.filter(e => e.type === 'substitution').length;
+  console.log(`   📊 Résumé: ${events.length} événements (${goals} buts, ${cards} cartons, ${subs} rempl.)`);
 
   // Stop capturing
   page.off('response', responseHandler);
 
-  // Save all captured network data for debug
-  if (isFirst) {
-    fs.writeFileSync(path.join(DEBUG_DIR, 'api-captured.json'), JSON.stringify(captured, null, 2));
-    console.log(`   📡 ${captured.length} réponses réseau capturées`);
+  // Save all captured network data for debug (first match only)
+  if (isFirst && captured.length > 0) {
+    try {
+      fs.writeFileSync(path.join(DEBUG_DIR, 'api-captured.json'), JSON.stringify(captured, null, 2));
+      console.log(`   📡 ${captured.length} réponses réseau capturées`);
+    } catch (_) {}
   }
 
   // Try to parse lineup from captured API responses if DOM extraction failed
@@ -286,7 +277,9 @@ async function scrapeMatchDetail(page, match, isFirst) {
     const parsed = parseApiResponses(captured, match.matchId);
     apiLineups = parsed.lineups;
     apiEvents = parsed.events;
-    if (isFirst) console.log(`   📡 API lineup: ${apiLineups.length}, events: ${apiEvents.length}`);
+    if (apiLineups.length > 0 || apiEvents.length > 0) {
+      console.log(`   📡 Fallback API: ${apiLineups.length} joueurs, ${apiEvents.length} événements`);
+    }
   }
 
   const finalLineups = lineups.length > 0 ? lineups : apiLineups;
