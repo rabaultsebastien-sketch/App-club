@@ -299,15 +299,31 @@ async function scrapeMatchDetail(page, match, isFirst) {
   // Prefer API data (has reliable team IDs via IH field)
   const apiHasTeams = apiParsed.lineups.some(p => p.team === 'home' || p.team === 'away');
   const finalLineups = apiHasTeams && apiParsed.lineups.length >= 10 ? apiParsed.lineups : domLineups;
-  const finalEvents = apiParsed.events.length > 0 ? apiParsed.events : domEvents;
   const source = finalLineups === apiParsed.lineups ? 'API' : 'DOM';
 
   // Filter: only our team's players
   const ourLineup = finalLineups.filter(p => p.team === ourSide);
-  // If team detection failed (all unknown), use all but log warning
   const fallbackLineup = ourLineup.length >= 8 ? ourLineup : finalLineups.filter(p => p.team === ourSide || p.team === 'unknown');
 
-  const ourEvents = finalEvents.filter(e => e.team === ourSide || e.team === 'unknown');
+  // Use ALL events (DOM + API combined, deduplicated)
+  // Don't filter events by team tag — instead match by player name
+  const allEvents = [...domEvents];
+  for (const ae of apiParsed.events) {
+    const isDupe = allEvents.some(e => e.type === ae.type && e.minute === ae.minute && normName(e.name) === normName(ae.name));
+    if (!isDupe) allEvents.push(ae);
+  }
+  // Remove phantom events (minute=0 with empty name)
+  const cleanEvents = allEvents.filter(e => e.name && e.name.length > 1);
+
+  // Build a set of our player names for matching
+  const ourNames = new Set(fallbackLineup.map(p => normName(p.name)));
+
+  // Match events to our players by name (not by team tag)
+  const ourEvents = cleanEvents.filter(e => {
+    if (ourNames.has(normName(e.name))) return true;
+    if (e.assistName && ourNames.has(normName(e.assistName))) return true;
+    return false;
+  });
 
   const goals = ourEvents.filter(e => e.type === 'goal').length;
   const cards = ourEvents.filter(e => e.type === 'yellowCard' || e.type === 'redCard').length;
@@ -318,7 +334,8 @@ async function scrapeMatchDetail(page, match, isFirst) {
     const allHome = finalLineups.filter(p => p.team === 'home');
     const allAway = finalLineups.filter(p => p.team === 'away');
     const allUnknown = finalLineups.filter(p => p.team === 'unknown');
-    console.log(`   🔎 Total: ${finalLineups.length} joueurs (${allHome.length} home, ${allAway.length} away, ${allUnknown.length} unknown) — source: ${source}`);
+    console.log(`   🔎 Lineup: ${finalLineups.length} total (${allHome.length} home, ${allAway.length} away, ${allUnknown.length} unknown) — source: ${source}`);
+    console.log(`   🔎 Events: ${cleanEvents.length} total → ${ourEvents.length} matchés à nos joueurs`);
   }
 
   // Extract match date
