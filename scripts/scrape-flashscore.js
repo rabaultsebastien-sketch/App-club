@@ -81,32 +81,98 @@ async function main() {
   await autoScroll(page);
   await sleep(1000);
 
-  // --- Extraction des matchs listés ---
+  // Sauvegarde debug : screenshot + structure HTML
+  const debugDir = path.join(ROOT, '.cache', 'debug');
+  fs.mkdirSync(debugDir, { recursive: true });
+  await page.screenshot({ path: path.join(debugDir, 'flashscore-page.png'), fullPage: true });
+  console.log(`📸 Screenshot: .cache/debug/flashscore-page.png`);
+
+  // Dump la structure des éléments pour debug
+  const pageStructure = await page.evaluate(() => {
+    const result = [];
+    // Cherche tous les éléments avec un id commençant par "g_"
+    const byId = document.querySelectorAll('[id^="g_"]');
+    result.push({ method: 'id^=g_', count: byId.length });
+    // Cherche par classes connues (variantes FlashScore)
+    const selectors = [
+      '[class*="event__match"]', '[class*="sportName"]',
+      '[class*="participant"]', '[class*="event__"]',
+      'a[href*="/match/"]', '[class*="rows"]'
+    ];
+    for (const sel of selectors) {
+      const els = document.querySelectorAll(sel);
+      result.push({ selector: sel, count: els.length });
+    }
+    // Récupère les liens vers des matchs
+    const matchLinks = document.querySelectorAll('a[href*="/match/"]');
+    const linkSample = Array.from(matchLinks).slice(0, 5).map(a => ({
+      href: a.getAttribute('href'),
+      text: a.textContent.trim().slice(0, 80)
+    }));
+    result.push({ matchLinkSamples: linkSample });
+    return result;
+  });
+  console.log('🔍 Structure page:', JSON.stringify(pageStructure, null, 2));
+
+  // --- Extraction des matchs : stratégie multi-sélecteurs ---
   const matchLinks = await page.evaluate(() => {
     const links = [];
-    // FlashScore utilise des divs avec class contenant "event__match"
-    const rows = document.querySelectorAll('[class*="event__match"]');
-    for (const row of rows) {
-      const id = row.id || '';
-      // id format: "g_1_XXXXXXXX"
-      const matchId = id.replace(/^g_\d+_/, '');
-      if (!matchId) continue;
+    const seen = new Set();
 
-      const homeEl = row.querySelector('[class*="participant--home"]');
-      const awayEl = row.querySelector('[class*="participant--away"]');
+    // Stratégie 1 : éléments avec id "g_X_MATCHID"
+    document.querySelectorAll('[id^="g_"]').forEach(row => {
+      const id = row.id || '';
+      const matchId = id.replace(/^g_\d+_/, '');
+      if (!matchId || seen.has(matchId)) return;
+      seen.add(matchId);
+      const text = row.textContent || '';
+      const homeEl = row.querySelector('[class*="participant--home"], [class*="homeParticipant"]');
+      const awayEl = row.querySelector('[class*="participant--away"], [class*="awayParticipant"]');
       const home = homeEl ? homeEl.textContent.trim() : '';
       const away = awayEl ? awayEl.textContent.trim() : '';
+      const scoreEls = row.querySelectorAll('[class*="score"], [class*="Score"]');
+      const scores = Array.from(scoreEls).map(e => e.textContent.trim()).filter(s => /^\d+$/.test(s));
+      const timeEl = row.querySelector('[class*="time"], [class*="Time"]');
+      links.push({
+        matchId, home, away,
+        scoreHome: scores[0] || '', scoreAway: scores[1] || '',
+        time: timeEl ? timeEl.textContent.trim() : ''
+      });
+    });
 
-      const scoreHomeEl = row.querySelector('[class*="score--home"]');
-      const scoreAwayEl = row.querySelector('[class*="score--away"]');
-      const scoreHome = scoreHomeEl ? scoreHomeEl.textContent.trim() : '';
-      const scoreAway = scoreAwayEl ? scoreAwayEl.textContent.trim() : '';
-
-      const timeEl = row.querySelector('[class*="event__time"]');
-      const time = timeEl ? timeEl.textContent.trim() : '';
-
-      links.push({ matchId, home, away, scoreHome, scoreAway, time });
+    // Stratégie 2 : liens <a> vers /match/XXXX/
+    if (links.length === 0) {
+      document.querySelectorAll('a[href*="/match/"]').forEach(a => {
+        const href = a.getAttribute('href') || '';
+        const m = href.match(/\/match\/([A-Za-z0-9]+)\//);
+        if (!m || seen.has(m[1])) return;
+        seen.add(m[1]);
+        const row = a.closest('[class*="event"]') || a.closest('div') || a;
+        const text = row.textContent.trim();
+        links.push({
+          matchId: m[1], home: '', away: '',
+          scoreHome: '', scoreAway: '',
+          time: '', rawText: text.slice(0, 120)
+        });
+      });
     }
+
+    // Stratégie 3 : sélecteurs génériques FlashScore
+    if (links.length === 0) {
+      const rows = document.querySelectorAll('[class*="event__match"], [class*="sportName__match"]');
+      rows.forEach(row => {
+        const id = row.id || '';
+        const matchId = id.replace(/^g_\d+_/, '') || ('row_' + Math.random().toString(36).slice(2, 8));
+        if (seen.has(matchId)) return;
+        seen.add(matchId);
+        links.push({
+          matchId, home: '', away: '',
+          scoreHome: '', scoreAway: '',
+          time: '', rawText: (row.textContent || '').trim().slice(0, 120)
+        });
+      });
+    }
+
     return links;
   });
 
