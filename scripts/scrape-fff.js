@@ -406,60 +406,39 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     for (const line of lines) {
       if (seen.has(line)) continue;
 
+      // Extract minute from line if present (e.g. "63'" or "63e")
+      const minMatch = line.match(/(\d+)[''′e]\s*/);
+      const minute = minMatch ? parseInt(minMatch[1]) : 0;
+
       // But (goal)
       if (/but\s+pour/i.test(line)) {
         seen.add(line);
         const m = line.match(/but\s+pour\s+(.+?)(?:inscrit|marqu[ée])\s+par\s+(.+)/i);
-        evts.push({
-          type: 'goal',
-          team: m ? m[1].trim() : '',
-          player: m ? m[2].trim() : '',
-          text: line
-        });
+        evts.push({ type: 'goal', team: m ? m[1].trim() : '', player: m ? m[2].trim() : '', minute, text: line });
       }
       // Carton jaune
       else if (/carton\s+jaune/i.test(line)) {
         seen.add(line);
         const m = line.match(/carton\s+jaune\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
-        evts.push({
-          type: 'yellowCard',
-          player: m ? m[1].trim() : '',
-          team: m ? (m[2] || '').trim() : '',
-          text: line
-        });
+        evts.push({ type: 'yellowCard', player: m ? m[1].trim() : '', team: m ? (m[2] || '').trim() : '', minute, text: line });
       }
       // Carton rouge
       else if (/carton\s+rouge/i.test(line)) {
         seen.add(line);
         const m = line.match(/carton\s+rouge\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
-        evts.push({
-          type: 'redCard',
-          player: m ? m[1].trim() : '',
-          team: m ? (m[2] || '').trim() : '',
-          text: line
-        });
+        evts.push({ type: 'redCard', player: m ? m[1].trim() : '', team: m ? (m[2] || '').trim() : '', minute, text: line });
       }
       // Remplacement
       else if (/remplacement|changement/i.test(line) && /remplace/i.test(line)) {
         seen.add(line);
         const m = line.match(/(.+?)\s+remplace\s+(.+)/i);
-        evts.push({
-          type: 'substitution',
-          playerIn: m ? m[1].trim() : '',
-          playerOut: m ? m[2].trim() : '',
-          text: line
-        });
+        evts.push({ type: 'substitution', playerIn: m ? m[1].trim() : '', playerOut: m ? m[2].trim() : '', minute, text: line });
       }
       // Avertissement
       else if (/avertissement/i.test(line)) {
         seen.add(line);
         const m = line.match(/avertissement\s+(?:pour\s+)?(.+?)(?:\s*\((.+?)\))?$/i);
-        evts.push({
-          type: 'yellowCard',
-          player: m ? m[1].trim() : '',
-          team: m ? (m[2] || '').trim() : '',
-          text: line
-        });
+        evts.push({ type: 'yellowCard', player: m ? m[1].trim() : '', team: m ? (m[2] || '').trim() : '', minute, text: line });
       }
     }
 
@@ -525,8 +504,14 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } else if (evt.type === 'substitution') {
       const pOut = findPlayerByText(evt.playerOut);
       const pIn = findPlayerByText(evt.playerIn);
-      if (pOut && pOut.starter) pOut.minutes = 0; // will be refined later
-      if (pIn) pIn.minutes = 1; // came on as sub
+      const min = evt.minute || 0;
+      if (pOut && pOut.starter && min > 0) {
+        pOut.minutes = min;
+      }
+      if (pIn) {
+        pIn.starter = false;
+        pIn.minutes = min > 0 ? (90 - min) : 0;
+      }
     } else if (evt.type === 'raw') {
       const p = findPlayerByText(evt.text);
       if (p) {
@@ -570,19 +555,20 @@ async function clickTab(page, keywords) {
 
 function printPlayerTable(detail) {
   console.log(`\n   ${detail.home} ${detail.scoreHome}-${detail.scoreAway} ${detail.away} — ${detail.round}`);
-  console.log('   ┌────┬──────────────────────────┬──────┬────┬────┬─────────┐');
-  console.log('   │ #  │ Nom                      │ Titu │ B  │ PD │ Cartons │');
-  console.log('   ├────┼──────────────────────────┼──────┼────┼────┼─────────┤');
+  console.log('   ┌────┬──────────────────────────┬──────┬──────┬────┬────┬─────────┐');
+  console.log('   │ #  │ Nom                      │ Titu │ Min  │ B  │ PD │ Cartons │');
+  console.log('   ├────┼──────────────────────────┼──────┼──────┼────┼────┼─────────┤');
   for (const p of detail.players) {
     const num = (p.number || '-').toString().padStart(2);
     const name = (p.name || '').padEnd(24).slice(0, 24);
     const titu = p.starter ? 'OUI' : 'non';
+    const min = String(p.minutes).padStart(4);
     const buts = String(p.goals).padStart(2);
     const pd = String(p.assists).padStart(2);
     const cj = p.yellowCards ? `${p.yellowCards}J` : '  ';
     const cr = p.redCards ? `${p.redCards}R` : '  ';
     const cartons = `${cj} ${cr}`.trim() || '-';
-    console.log(`   │ ${num} │ ${name} │ ${titu}  │ ${buts} │ ${pd} │ ${cartons.padEnd(7)} │`);
+    console.log(`   │ ${num} │ ${name} │ ${titu}  │ ${min} │ ${buts} │ ${pd} │ ${cartons.padEnd(7)} │`);
   }
-  console.log('   └────┴──────────────────────────┴──────┴────┴────┴─────────┘');
+  console.log('   └────┴──────────────────────────┴──────┴──────┴────┴────┴─────────┘');
 }
