@@ -147,7 +147,7 @@ function matchesTeam(text) {
       return;
     }
 
-    const toProcess = TEST_MODE ? matchLinks.slice(0, 1) : matchLinks.slice(0, 5);
+    const toProcess = TEST_MODE ? matchLinks.links.slice(0, 1) : matchLinks.links.slice(0, 5);
     if (TEST_MODE) console.log('\n🧪 MODE TEST — 1 seul match\n');
 
     const allResults = [];
