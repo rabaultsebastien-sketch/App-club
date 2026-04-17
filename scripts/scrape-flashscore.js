@@ -264,8 +264,8 @@ async function scrapeMatchDetail(page, match, isFirst) {
     } catch (e) { console.log(`   ⚠️ Debug screenshot compo: ${e.message.slice(0, 80)}`); }
   }
 
-  const lineups = await extractLineup(page);
-  console.log(`   📊 Compo: ${lineups.length} joueurs trouvés`);
+  // Extract lineup from DOM (both teams)
+  const domLineups = await extractLineup(page);
 
   // --- Résumé tab ---
   await page.goto(url + '#/resume-du-match/resume-du-match', { waitUntil: 'networkidle2', timeout: 30000 });
@@ -278,41 +278,48 @@ async function scrapeMatchDetail(page, match, isFirst) {
       await page.screenshot({ path: path.join(DEBUG_DIR, 'match-resume.png') });
       const html = await page.evaluate(() => document.body.innerHTML);
       fs.writeFileSync(path.join(DEBUG_DIR, 'match-resume.html'), html);
-      console.log('   📸 Debug résumé: .cache/debug/match-resume.png');
-    } catch (e) { console.log(`   ⚠️ Debug screenshot résumé: ${e.message.slice(0, 80)}`); }
+    } catch (e) {}
   }
 
-  const events = await extractEvents(page);
-  const goals = events.filter(e => e.type === 'goal').length;
-  const cards = events.filter(e => e.type === 'yellowCard' || e.type === 'redCard').length;
-  const subs = events.filter(e => e.type === 'substitution').length;
-  console.log(`   📊 Résumé: ${events.length} événements (${goals} buts, ${cards} cartons, ${subs} rempl.)`);
+  const domEvents = await extractEvents(page);
 
   // Stop capturing
   page.off('response', responseHandler);
 
-  // Save all captured network data for debug (first match only)
+  // Always parse API responses (primary data source — has explicit team IDs)
+  const apiParsed = parseApiResponses(captured, match.matchId);
+
+  // Save debug data
   if (isFirst && captured.length > 0) {
     try {
       fs.writeFileSync(path.join(DEBUG_DIR, 'api-captured.json'), JSON.stringify(captured, null, 2));
-      console.log(`   📡 ${captured.length} réponses réseau capturées`);
     } catch (_) {}
   }
 
-  // Try to parse lineup from captured API responses if DOM extraction failed
-  let apiLineups = [];
-  let apiEvents = [];
-  if (lineups.length === 0 || events.length === 0) {
-    const parsed = parseApiResponses(captured, match.matchId);
-    apiLineups = parsed.lineups;
-    apiEvents = parsed.events;
-    if (apiLineups.length > 0 || apiEvents.length > 0) {
-      console.log(`   📡 Fallback API: ${apiLineups.length} joueurs, ${apiEvents.length} événements`);
-    }
-  }
+  // Prefer API data (has reliable team IDs via IH field)
+  const apiHasTeams = apiParsed.lineups.some(p => p.team === 'home' || p.team === 'away');
+  const finalLineups = apiHasTeams && apiParsed.lineups.length >= 10 ? apiParsed.lineups : domLineups;
+  const finalEvents = apiParsed.events.length > 0 ? apiParsed.events : domEvents;
+  const source = finalLineups === apiParsed.lineups ? 'API' : 'DOM';
 
-  const finalLineups = lineups.length > 0 ? lineups : apiLineups;
-  const finalEvents = events.length > 0 ? events : apiEvents;
+  // Filter: only our team's players
+  const ourLineup = finalLineups.filter(p => p.team === ourSide);
+  // If team detection failed (all unknown), use all but log warning
+  const fallbackLineup = ourLineup.length >= 8 ? ourLineup : finalLineups.filter(p => p.team === ourSide || p.team === 'unknown');
+
+  const ourEvents = finalEvents.filter(e => e.team === ourSide || e.team === 'unknown');
+
+  const goals = ourEvents.filter(e => e.type === 'goal').length;
+  const cards = ourEvents.filter(e => e.type === 'yellowCard' || e.type === 'redCard').length;
+  const subs = ourEvents.filter(e => e.type === 'substitution').length;
+  console.log(`   📊 ${source}: ${fallbackLineup.length} joueurs Orléans, ${ourEvents.length} événements (${goals} buts, ${cards} cartons, ${subs} rempl.)`);
+
+  if (TEST_MODE) {
+    const allHome = finalLineups.filter(p => p.team === 'home');
+    const allAway = finalLineups.filter(p => p.team === 'away');
+    const allUnknown = finalLineups.filter(p => p.team === 'unknown');
+    console.log(`   🔎 Total: ${finalLineups.length} joueurs (${allHome.length} home, ${allAway.length} away, ${allUnknown.length} unknown) — source: ${source}`);
+  }
 
   // Extract match date
   const matchDate = await page.evaluate(() => {
@@ -328,10 +335,9 @@ async function scrapeMatchDetail(page, match, isFirst) {
     return el ? el.textContent.trim() : '';
   });
 
-  if (finalLineups.length === 0 && finalEvents.length === 0) return null;
+  if (fallbackLineup.length === 0 && ourEvents.length === 0) return null;
 
-  const ourLineup = finalLineups.filter(p => p.team === ourSide || p.team === 'unknown');
-  const players = buildPlayerList(ourLineup, finalEvents, ourSide);
+  const players = buildPlayerList(fallbackLineup, ourEvents, ourSide);
 
   return {
     matchId: match.matchId,
@@ -642,8 +648,6 @@ function buildPlayerList(lineups, events, ourSide) {
   players.forEach(p => { byName[normName(p.name)] = p; });
 
   for (const evt of events) {
-    if (evt.team !== ourSide && evt.team !== 'unknown') continue;
-
     const key = normName(evt.name);
     const p = byName[key];
 
