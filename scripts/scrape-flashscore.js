@@ -15,7 +15,9 @@
 
    ============================================================= */
 
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 const fs = require('fs');
 const path = require('path');
 
@@ -25,7 +27,7 @@ const PROFILE_DIR = path.join(ROOT, '.cache', 'flashscore-profile');
 [OUTPUT_DIR, PROFILE_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 const TEAM_KEYWORDS = ['orl\u00e9ans', 'orleans'];
-const CALENDAR_URL = 'https://www.flashscore.fr/football/france/national/calendrier/';
+const RESULTS_URL = 'https://www.flashscore.fr/equipe/orleans/AqswAEFD/resultats/';
 
 function matchesTeam(text) {
   if (!text) return false;
@@ -52,12 +54,11 @@ async function autoScroll(page) {
 }
 
 async function main() {
-  console.log('\n\u{1F680} Lancement de Chrome...');
+  console.log('\n\u{1F680} Lancement de Chrome (stealth mode)...');
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    args: ['--start-maximized', '--no-sandbox', '--disable-blink-features=AutomationControlled']
+    args: ['--start-maximized', '--no-sandbox']
   });
 
   const page = (await browser.pages())[0];
@@ -78,9 +79,9 @@ async function main() {
     } catch (_) {}
   }
 
-  // --- Étape 2 : naviguer vers le calendrier National ---
-  console.log('\u{1F310} Chargement calendrier National...');
-  await page.goto(CALENDAR_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+  // --- Étape 2 : naviguer vers les résultats US Orléans ---
+  console.log('\u{1F310} Chargement résultats US Orléans...');
+  await page.goto(RESULTS_URL, { waitUntil: 'networkidle2', timeout: 30000 });
   await sleep(5000);
 
   // Scroll pour charger plus de matchs
