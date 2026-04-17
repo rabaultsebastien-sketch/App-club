@@ -78,7 +78,7 @@ async function main() {
     await sleep(2000);
   }
 
-  await page.screenshot({ path: path.join(DEBUG_DIR, 'results-page.png'), fullPage: true });
+  try { await page.screenshot({ path: path.join(DEBUG_DIR, 'results-page.png') }); } catch (_) {}
 
   // Extract matches with competition headers
   const matches = await page.evaluate(() => {
