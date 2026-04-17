@@ -296,34 +296,49 @@ async function scrapeMatchDetail(page, match, isFirst) {
     } catch (_) {}
   }
 
-  // Prefer API data (has reliable team IDs via IH field)
-  const apiHasTeams = apiParsed.lineups.some(p => p.team === 'home' || p.team === 'away');
-  const finalLineups = apiHasTeams && apiParsed.lineups.length >= 10 ? apiParsed.lineups : domLineups;
-  const source = finalLineups === apiParsed.lineups ? 'API' : 'DOM';
+  // Use DOM as primary source (consistent name formats between lineups and events)
+  // API as fallback only when DOM fails
+  let finalLineups = domLineups;
+  let source = 'DOM';
+
+  if (domLineups.length < 8) {
+    const apiHasTeams = apiParsed.lineups.some(p => p.team === 'home' || p.team === 'away');
+    if (apiHasTeams && apiParsed.lineups.length >= 10) {
+      finalLineups = apiParsed.lineups;
+      source = 'API';
+    }
+  }
 
   // Filter: only our team's players
   const ourLineup = finalLineups.filter(p => p.team === ourSide);
   const fallbackLineup = ourLineup.length >= 8 ? ourLineup : finalLineups.filter(p => p.team === ourSide || p.team === 'unknown');
 
-  // Use ALL events (DOM + API combined, deduplicated)
-  // Don't filter events by team tag — instead match by player name
+  // Combine DOM + API events, deduplicate, remove phantoms
   const allEvents = [...domEvents];
   for (const ae of apiParsed.events) {
     const isDupe = allEvents.some(e => e.type === ae.type && e.minute === ae.minute && normName(e.name) === normName(ae.name));
     if (!isDupe) allEvents.push(ae);
   }
-  // Remove phantom events (minute=0 with empty name)
   const cleanEvents = allEvents.filter(e => e.name && e.name.length > 1);
 
-  // Build a set of our player names for matching
-  const ourNames = new Set(fallbackLineup.map(p => normName(p.name)));
+  // Build name lookup for our players (exact + surname-only for fuzzy matching)
+  const ourNamesExact = new Set(fallbackLineup.map(p => normName(p.name)));
+  const ourSurnames = new Set(fallbackLineup.map(p => {
+    const parts = normName(p.name).split(/\s+/);
+    return parts[0]; // FlashScore format: "Surname FirstInitial" → first word is surname
+  }));
 
-  // Match events to our players by name (not by team tag)
-  const ourEvents = cleanEvents.filter(e => {
-    if (ourNames.has(normName(e.name))) return true;
-    if (e.assistName && ourNames.has(normName(e.assistName))) return true;
-    return false;
-  });
+  function matchesOurPlayer(name) {
+    if (!name) return false;
+    const n = normName(name);
+    if (ourNamesExact.has(n)) return true;
+    // Fuzzy: check if event surname matches a player surname
+    const parts = n.split(/\s+/);
+    return parts.some(p => p.length >= 3 && ourSurnames.has(p));
+  }
+
+  // Match events to our players by name
+  const ourEvents = cleanEvents.filter(e => matchesOurPlayer(e.name) || matchesOurPlayer(e.assistName));
 
   const goals = ourEvents.filter(e => e.type === 'goal').length;
   const cards = ourEvents.filter(e => e.type === 'yellowCard' || e.type === 'redCard').length;
@@ -361,7 +376,7 @@ async function scrapeMatchDetail(page, match, isFirst) {
     date: parseFlashscoreDate(matchDate),
     round: roundInfo,
     players,
-    rawEvents: finalEvents
+    rawEvents: ourEvents
   };
 }
 
@@ -663,18 +678,33 @@ function buildPlayerList(lineups, events, ourSide) {
   }));
 
   const byName = {};
-  players.forEach(p => { byName[normName(p.name)] = p; });
+  const bySurname = {};
+  players.forEach(p => {
+    byName[normName(p.name)] = p;
+    const surname = normName(p.name).split(/\s+/)[0];
+    if (surname.length >= 3) bySurname[surname] = p;
+  });
+
+  function findPlayer(name) {
+    if (!name) return null;
+    const n = normName(name);
+    if (byName[n]) return byName[n];
+    const parts = n.split(/\s+/);
+    for (const part of parts) {
+      if (part.length >= 3 && bySurname[part]) return bySurname[part];
+    }
+    return null;
+  }
 
   for (const evt of events) {
-    const key = normName(evt.name);
-    const p = byName[key];
+    const p = findPlayer(evt.name);
 
     if (evt.type === 'goal') {
       if (p) p.goals++;
       // Handle assist
       if (evt.assistName) {
-        const aKey = normName(evt.assistName);
-        if (byName[aKey]) byName[aKey].assists++;
+        const ap = findPlayer(evt.assistName);
+        if (ap) ap.assists++;
       }
     } else if (evt.type === 'yellowCard') {
       if (p) p.yellowCards++;
