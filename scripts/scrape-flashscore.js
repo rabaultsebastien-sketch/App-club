@@ -25,8 +25,7 @@ const PROFILE_DIR = path.join(ROOT, '.cache', 'flashscore-profile');
 [OUTPUT_DIR, PROFILE_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 const TEAM_KEYWORDS = ['orl\u00e9ans', 'orleans'];
-const TEAM_URL = 'https://www.flashscore.fr/equipe/us-orleans/llgrMnKF/';
-const CALENDAR_URL = 'https://www.flashscore.fr/equipe/us-orleans/llgrMnKF/resultats/';
+const CALENDAR_URL = 'https://www.flashscore.fr/football/france/national/calendrier/';
 
 function matchesTeam(text) {
   if (!text) return false;
@@ -66,26 +65,44 @@ async function main() {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   });
 
-  // --- Page résultats de l'équipe ---
-  console.log('\u{1F310} Chargement des résultats US Orléans...');
-  await page.goto(CALENDAR_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-  await sleep(2000);
+  // --- Étape 1 : page d'accueil pour accepter les cookies ---
+  console.log('\u{1F310} Ouverture de FlashScore...');
+  await page.goto('https://www.flashscore.fr/', { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(3000);
 
-  // Accepte les cookies si le bandeau apparaît
-  try {
-    const acceptBtn = await page.$('#onetrust-accept-btn-handler');
-    if (acceptBtn) { await acceptBtn.click(); await sleep(1000); }
-  } catch (_) {}
+  // Accepte les cookies (plusieurs sélecteurs possibles)
+  for (const sel of ['#onetrust-accept-btn-handler', '[id*="accept"]', 'button[class*="accept"]']) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) { await btn.click(); console.log('🍪 Cookies acceptés'); await sleep(1500); break; }
+    } catch (_) {}
+  }
+
+  // --- Étape 2 : naviguer vers le calendrier National ---
+  console.log('\u{1F310} Chargement calendrier National...');
+  await page.goto(CALENDAR_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(5000);
 
   // Scroll pour charger plus de matchs
   await autoScroll(page);
-  await sleep(1000);
+  await sleep(2000);
 
-  // Sauvegarde debug : screenshot + structure HTML
+  // Sauvegarde debug
   const debugDir = path.join(ROOT, '.cache', 'debug');
   fs.mkdirSync(debugDir, { recursive: true });
   await page.screenshot({ path: path.join(debugDir, 'flashscore-page.png'), fullPage: true });
   console.log(`📸 Screenshot: .cache/debug/flashscore-page.png`);
+
+  // Dump un extrait du body HTML pour debug
+  const bodySnippet = await page.evaluate(() => {
+    const body = document.body;
+    if (!body) return '(no body)';
+    return body.innerHTML.slice(0, 2000);
+  });
+  fs.writeFileSync(path.join(debugDir, 'flashscore-body.html'), bodySnippet);
+  console.log(`📄 HTML dump: .cache/debug/flashscore-body.html`);
+  console.log(`📌 URL actuelle: ${page.url()}`);
+  console.log(`📌 Titre page: ${await page.title()}`);
 
   // Dump la structure des éléments pour debug
   const pageStructure = await page.evaluate(() => {
