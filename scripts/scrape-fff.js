@@ -296,12 +296,24 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     }
   }
 
+  // Clean team names: strip trailing digits (minute concatenation artifact like "ORLEANS US 45")
+  const cleanTeam = (t) => (t || '').replace(/\s+\d+\s*$/, '').replace(/\s+/g, ' ').trim();
+  homeTeam = cleanTeam(homeTeam);
+  awayTeam = cleanTeam(awayTeam);
+
   // ─── Find score ───
   let scoreHome = '', scoreAway = '';
   for (const line of raw.lines) {
     // Look for standalone score like "1 - 1" or "2 - 0"
     const m = line.match(/^(\d{1,2})\s*[-–]\s*(\d{1,2})$/);
     if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
+  }
+  // Fallback: look for score near "score" or "résultat" labels
+  if (!scoreHome) {
+    for (const line of raw.lines) {
+      const m = line.match(/(?:score|résultat|final)[\s:]*(\d{1,2})\s*[-–]\s*(\d{1,2})/i);
+      if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
+    }
   }
 
   // ─── Find date ───
@@ -515,6 +527,20 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return 0;
   }
 
+  // Substring dedup: when the DOM + innerText dual-strategy captures the same event
+  // as "concatenated" (with minute) and "separated" (without minute), the separated
+  // forms are substrings of the concatenated form. Sort by length desc and skip
+  // any text that's already contained in a longer processed text.
+  const sortedTexts = [...rawEventTexts].sort((a, b) => b.length - a.length);
+  const processedTexts = [];
+  const dedupedTexts = [];
+  for (const t of sortedTexts) {
+    if (processedTexts.some(p => p.includes(t))) continue;
+    processedTexts.push(t);
+    dedupedTexts.push(t);
+  }
+  if (isFirst) console.log(`   🧹 ${dedupedTexts.length} événements après dedup substring (sur ${rawEventTexts.length})`);
+
   // Classify events and apply to our players (dedup by type+player+~minute)
   const appliedEvents = [];
   const appliedKeys = new Set();
@@ -525,7 +551,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return true;
   };
 
-  for (const text of rawEventTexts) {
+  for (const text of dedupedTexts) {
     const minute = extractMinute(text);
 
     if (/inscrit\s*par|buteur/i.test(text) || (/\bbut\b/i.test(text) && !/remplace|changement/i.test(text))) {
