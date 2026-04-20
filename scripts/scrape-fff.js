@@ -347,7 +347,10 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   const allPlayers = [];
   const KNOWN_TEAMS = ['dijon', 'sochaux', 'rouen', 'fleury', 'puy', 'versailles', 'valenciennes',
     'caen', 'villefranche', 'aubagne', 'concarneau', 'paris 13', 'quevilly', 'bourg', 'chateauroux',
-    'briochin', 'fcvb', 'fbbp', 'qrm', 'berri', 'nimes'];
+    'briochin', 'fcvb', 'fbbp', 'qrm', 'berri', 'nimes', 'orleans', 'orléans', 'brieuc', 'stade',
+    'boulogne', 'boulogne-sur-mer', 'martigues', 'thonon', 'goal', 'sporting', 'racing'];
+  // Regex for generic team suffixes / standings cells
+  const TEAM_SUFFIX = /\b(FC|SC|US|AS|AC|CS|SO|EA|SCO|FCO|OGC|SM|CA|CSG|RCS|OL|UFC|STADE|FOOTBALL|CLUB|ATHLETIC|SPORTIF)\b/;
 
   for (const row of raw.tableRows) {
     // Check for number + name pattern
@@ -357,10 +360,15 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       if (!/^\d{1,2}$/.test(num)) continue;
       if (!name || name.length < 3 || name.length > 50) continue;
 
-      // Skip if this looks like a standings row (team name)
+      // Reject names with digits (player names never contain digits — "ORLEANS US 45", "-14")
+      if (/\d/.test(name)) continue;
+      // Reject names with leading dash (goal differentials like "-14")
+      if (/^-/.test(name)) continue;
+
+      // Skip if this looks like a standings row (team name or team suffix)
       const lower = name.toLowerCase();
       if (KNOWN_TEAMS.some(t => lower.includes(t))) continue;
-      if (/^[A-Z\s.]+$/.test(name) && (name.includes(' FC') || name.includes(' US') || name.includes(' SC'))) continue;
+      if (TEAM_SUFFIX.test(name)) continue;
 
       // Skip duplicates
       if (allPlayers.some(p => p.name === name)) continue;
