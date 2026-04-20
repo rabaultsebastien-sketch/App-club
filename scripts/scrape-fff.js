@@ -270,26 +270,29 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return { lines: lines.slice(0, 200), tableRows: tableRows.slice(0, 80), teamNames, title: document.title };
   });
 
-  // ─── Parse team names from title ───
-  // Title format: "Match Orléans vs Concarneau | FFF" or similar
-  let homeTeam = '', awayTeam = '';
-  // Try from URL: 53441338-u-s-orleans-loiret-football-u-s-concarnoise-beuzecquoise
-  const urlSlug = matchUrl.split('/').pop();
-  const slugParts = urlSlug.replace(/^\d+-/, '').split(/-(?=[a-z])/);
+  // ─── Parse team names ───
+  // Blacklist words that indicate this is event text, not a team name
+  const isEventText = (s) => /changement|avertissement|but\s+pour|inscrit|averti|exclu|remplace|passeur|carton|voir plus|journée|\d+'/i.test(s);
 
-  // Find team names from the page lines
-  for (const line of raw.lines) {
-    if (matchesTeam(line) && line.length <= 30) {
-      if (!homeTeam) homeTeam = line;
-      else if (line !== homeTeam) { awayTeam = line; break; }
-    }
+  let homeTeam = '', awayTeam = '';
+  const urlSlug = matchUrl.split('/').slice(-2, -1)[0] || matchUrl.split('/').pop() || '';
+
+  // Strategy 1: team name elements (h1/h2/h3/[class*="team"]) — skip event-text pollution
+  for (const tn of raw.teamNames) {
+    if (isEventText(tn) || tn.length < 4 || tn.length > 50) continue;
+    if (!homeTeam) homeTeam = tn;
+    else if (tn !== homeTeam) { awayTeam = tn; break; }
   }
 
-  // Try from raw.teamNames if not found
+  // Strategy 2: fallback to page lines, skipping event text
   if (!homeTeam || !awayTeam) {
-    for (const tn of raw.teamNames) {
-      if (!homeTeam && tn.length <= 50) homeTeam = tn;
-      else if (homeTeam && tn !== homeTeam && tn.length <= 50) { awayTeam = tn; break; }
+    for (const line of raw.lines) {
+      if (isEventText(line) || line.length < 4 || line.length > 40) continue;
+      if (!matchesTeam(line) && !/\b(FC|SC|US|AS|AC|SO|FBBP|QRM|SM|EA)\b/.test(line)) continue;
+      if (!homeTeam) homeTeam = line;
+      else if (line !== homeTeam && !homeTeam.includes(line) && !line.includes(homeTeam)) {
+        awayTeam = line; break;
+      }
     }
   }
 
@@ -321,11 +324,22 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   }
 
   // ─── Determine our side ───
-  const isHome = matchesTeam(homeTeam);
+  // PRIMARY: use URL slug — home team appears first, away team after
+  // e.g. "sporting-club-aubagne-air-bel-u-s-orleans-loiret-football"
+  // → "u-s-orleans" is in the second half → Orléans is AWAY
+  const slugLower = urlSlug.replace(/^\d+-/, '').toLowerCase();
+  const orleansIdx = slugLower.search(/(orleans|u-s-orleans)/);
+  let isHome;
+  if (orleansIdx >= 0) {
+    isHome = orleansIdx < slugLower.length / 2;
+  } else {
+    // Fallback: check team names (only if homeTeam looks like a real name, not event text)
+    isHome = matchesTeam(homeTeam) && !isEventText(homeTeam);
+  }
   const ourSide = isHome ? 'home' : 'away';
   const opponent = isHome ? awayTeam : homeTeam;
 
-  console.log(`   📋 ${homeTeam} ${scoreHome}-${scoreAway} ${awayTeam} (${round})`);
+  console.log(`   📋 ${homeTeam} ${scoreHome}-${scoreAway} ${awayTeam} (${round}) — Orléans ${isHome ? 'Domicile' : 'Extérieur'}`);
 
   // ─── Extract players from tables ───
   // FFF feuille de match: tables with rows [number, name, ...]
@@ -493,8 +507,16 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return 0;
   }
 
-  // Classify events and apply to our players
+  // Classify events and apply to our players (dedup by type+player+~minute)
   const appliedEvents = [];
+  const appliedKeys = new Set();
+  const applyOnce = (key, fn) => {
+    if (appliedKeys.has(key)) return false;
+    appliedKeys.add(key);
+    fn();
+    return true;
+  };
+
   for (const text of rawEventTexts) {
     const minute = extractMinute(text);
 
@@ -503,49 +525,56 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       const parts = text.split(/inscrit\s*par/i);
       const scorer = parts.length > 1 ? findPlayerInText(parts[parts.length - 1]) : findPlayerInText(text);
       if (scorer) {
-        scorer.goals++;
-        appliedEvents.push(`⚽ ${minute}' ${scorer.name}`);
+        applyOnce(`goal:${scorer.name}:${minute}`, () => {
+          scorer.goals++;
+          appliedEvents.push(`⚽ ${minute}' ${scorer.name}`);
+        });
       }
       // Check for assist in same event
       const am = text.match(/pass(?:eur|e)\s+d[ée]cisiv[eo]?\s*(?:de|:)?\s*(.*)/i);
       if (am) {
         const assister = findPlayerInText(am[1]);
-        if (assister) { assister.assists++; appliedEvents.push(`🅰️ PD: ${assister.name}`); }
+        if (assister) applyOnce(`assist:${assister.name}:${minute}`, () => {
+          assister.assists++; appliedEvents.push(`🅰️ PD: ${assister.name}`);
+        });
       }
 
     } else if ((/est\s+averti|avertissement|carton\s+jaune/i.test(text)) && !/exclu|rouge/i.test(text)) {
-      // 🟡 Yellow card
+      // 🟡 Yellow card — dedup per player regardless of minute (second yellow = red handled elsewhere)
       const player = findPlayerInText(text);
-      if (player) {
+      if (player) applyOnce(`yellow:${player.name}`, () => {
         player.yellowCards++;
         appliedEvents.push(`🟡 ${minute}' ${player.name}`);
-      }
+      });
 
     } else if (/est\s+exclu|carton\s+rouge/i.test(text)) {
       // 🔴 Red card
       const player = findPlayerInText(text);
-      if (player) {
+      if (player) applyOnce(`red:${player.name}`, () => {
         player.redCards++;
         appliedEvents.push(`🔴 ${minute}' ${player.name}`);
-      }
+      });
 
     } else if (/remplace/i.test(text)) {
       // 🔄 Substitution — split at "remplace" to identify in/out
       const parts = text.split(/remplace/i);
       const playerIn = findPlayerInText(parts[0]);
       const playerOut = parts.length > 1 ? findPlayerInText(parts[1]) : null;
-      if (playerOut && minute > 0) playerOut.minutes = minute;
-      if (playerIn && minute > 0) playerIn.minutes = 90 - minute;
-      if (playerIn || playerOut)
-        appliedEvents.push(`🔄 ${minute}' ${playerIn ? playerIn.name : '?'} ← ${playerOut ? playerOut.name : '?'}`);
+      const key = `sub:${playerIn ? playerIn.name : '?'}:${playerOut ? playerOut.name : '?'}`;
+      applyOnce(key, () => {
+        if (playerOut && minute > 0) playerOut.minutes = minute;
+        if (playerIn && minute > 0) playerIn.minutes = 90 - minute;
+        if (playerIn || playerOut)
+          appliedEvents.push(`🔄 ${minute}' ${playerIn ? playerIn.name : '?'} ← ${playerOut ? playerOut.name : '?'}`);
+      });
 
     } else if (/pass(?:eur|e)\s+d[ée]cisiv/i.test(text)) {
       // 🅰️ Standalone assist event
       const player = findPlayerInText(text);
-      if (player) {
+      if (player) applyOnce(`assist:${player.name}`, () => {
         player.assists++;
         appliedEvents.push(`🅰️ PD: ${player.name}`);
-      }
+      });
     }
   }
 
