@@ -247,7 +247,8 @@ function openPlayerDetails(playerId) {
   const rows = (p.matches || []).slice().sort((a, b) => b.date.localeCompare(a.date)).map(m => `
     <tr>
       <td>${m.date || ''}</td>
-      <td>${escapeHtml(m.opponent || '')}</td>
+      <td>${escapeHtml(m.round || '')}</td>
+      <td>${escapeHtml(m.title || m.opponent || '')}</td>
       <td class="num">${m.starter ? 'Titulaire' : 'Remplaçant'}</td>
       <td class="num">${m.minutes}'</td>
       <td class="num">${m.goals}</td>
@@ -275,7 +276,7 @@ function openPlayerDetails(playerId) {
     <div class="matches-section">
       <h4>Historique des matchs</h4>
       ${rows ? `<table class="matches-table">
-        <thead><tr><th>Date</th><th>Adv.</th><th>Rôle</th><th>Min</th><th>B</th><th>PD</th><th>🟨</th><th>🟥</th><th></th></tr></thead>
+        <thead><tr><th>Date</th><th>Journée</th><th>Match</th><th>Rôle</th><th>Min</th><th>B</th><th>PD</th><th>🟨</th><th>🟥</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>` : `<div class="empty">Aucun match enregistré.</div>`}
     </div>
@@ -1712,8 +1713,12 @@ function openFlashscorePreview(matches) {
       return p.team === 'unknown';
     });
 
+    const title = m.title || ((m.home && m.away) ? `${m.home} - ${m.away}` : '');
+
     return {
       idx, date: m.date || '', opponent, venue,
+      round: m.round || '',
+      title,
       score: `${m.scoreHome || '?'} - ${m.scoreAway || '?'}`,
       players: ourPlayers
     };
@@ -1723,7 +1728,8 @@ function openFlashscorePreview(matches) {
     <tr>
       <td><input type="checkbox" data-midx="${m.idx}" checked /></td>
       <td>${escapeHtml(m.date)}</td>
-      <td>${escapeHtml(m.opponent)}</td>
+      <td>${escapeHtml(m.round)}</td>
+      <td>${escapeHtml(m.title || m.opponent)}</td>
       <td>${escapeHtml(m.venue)}</td>
       <td class="num">${escapeHtml(m.score)}</td>
       <td class="num">${m.players.length}</td>
@@ -1731,11 +1737,11 @@ function openFlashscorePreview(matches) {
   `).join('');
 
   openModal(`
-    <h3>\u26A1 Import FlashScore</h3>
+    <h3>\u26A1 Import FFF</h3>
     <div class="card-sub">${matches.length} match(s) trouv\u00e9(s). Cochez ceux \u00e0 importer.</div>
     <div style="max-height:50vh; overflow:auto; margin-top:12px;">
       <table class="matches-table">
-        <thead><tr><th></th><th>Date</th><th>Adversaire</th><th>Lieu</th><th>Score</th><th>Joueurs</th></tr></thead>
+        <thead><tr><th></th><th>Date</th><th>Journée</th><th>Match</th><th>Lieu</th><th>Score</th><th>Joueurs</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
     </div>
@@ -1785,13 +1791,15 @@ function openFlashscorePreview(matches) {
           date: m.date,
           opponent: m.opponent,
           venue: m.venue,
+          round: m.round || '',
+          title: m.title || '',
           starter: fp.starter !== false,
           minutes: Number(fp.minutes) || 0,
           goals: Number(fp.goals) || 0,
           assists: Number(fp.assists) || 0,
           yellowCards: Number(fp.yellowCards) || 0,
           redCards: Number(fp.redCards) || 0,
-          notes: 'Import FlashScore'
+          notes: 'Import FFF'
         });
         added++;
       }

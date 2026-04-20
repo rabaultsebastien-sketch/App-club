@@ -24,6 +24,8 @@ const FFF_URL = 'https://epreuves.fff.fr/competition/engagement/1-national/phase
 const TEAM_KEYWORDS = ['orléans', 'orleans'];
 const BASE_URL = 'https://epreuves.fff.fr';
 const TEST_MODE = process.argv.includes('--test');
+const URL_IDX = process.argv.indexOf('--url');
+const SINGLE_URL = URL_IDX !== -1 ? process.argv[URL_IDX + 1] : null;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -47,6 +49,39 @@ function matchesTeam(text) {
   await page.setViewport({ width: 1400, height: 900 });
 
   try {
+    // ─── Single-match mode (via --url flag) ───
+    if (SINGLE_URL) {
+      console.log(`🎯 Match ciblé: ${SINGLE_URL}`);
+      // Accept cookies on first navigation
+      await page.goto(SINGLE_URL, { waitUntil: 'networkidle2', timeout: 45000 });
+      await sleep(2000);
+      try {
+        const btn = await page.$('#didomi-notice-agree-button');
+        if (btn) { await btn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
+      } catch (_) {}
+
+      const detail = await scrapeMatchDetail(page, SINGLE_URL, true);
+      if (detail && detail.players.length > 0) {
+        const g = detail.players.reduce((s, p) => s + p.goals, 0);
+        const c = detail.players.reduce((s, p) => s + p.yellowCards + p.redCards, 0);
+        const starters = detail.players.filter(p => p.starter).length;
+        const subs = detail.players.filter(p => !p.starter).length;
+        console.log(`   ✅ ${detail.players.length} joueurs (${starters} titu + ${subs} rempl.) | ${g} but(s), ${c} carton(s)`);
+        printPlayerTable(detail);
+
+        const stamp = new Date().toISOString().slice(0, 10);
+        const slug = SINGLE_URL.split('/').slice(-2, -1)[0].slice(0, 40);
+        const outFile = path.join(OUTPUT_DIR, `fff-orleans-${slug}-${stamp}.json`);
+        fs.writeFileSync(outFile, JSON.stringify([detail], null, 2));
+        console.log(`\n✅ Match → ${outFile}`);
+      } else {
+        console.log('   ⚠️ Pas de données');
+      }
+      console.log('\n(Fermez Chrome pour terminer)');
+      await new Promise(r => browser.on('disconnected', r));
+      return;
+    }
+
     console.log('🌐 Ouverture FFF résultats...');
     await page.goto(FFF_URL, { waitUntil: 'networkidle2', timeout: 45000 });
     await sleep(3000);
@@ -523,10 +558,13 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   if (players.length === 0) return null;
 
+  const title = (homeTeam && awayTeam) ? `${homeTeam} - ${awayTeam}` : '';
+
   return {
     matchId: urlSlug,
     date: matchDate,
     round,
+    title,
     home: homeTeam,
     away: awayTeam,
     scoreHome,
