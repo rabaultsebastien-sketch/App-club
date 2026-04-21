@@ -364,13 +364,23 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   // ─── Find date ───
   let matchDate = '';
-  const monthMap = { janvier: '01', 'février': '02', mars: '03', avril: '04', mai: '05', juin: '06',
-    juillet: '07', 'août': '08', septembre: '09', octobre: '10', novembre: '11', 'décembre': '12' };
+  const monthMap = {
+    janvier: '01', 'février': '02', mars: '03', avril: '04', mai: '05', juin: '06',
+    juillet: '07', 'août': '08', septembre: '09', octobre: '10', novembre: '11', 'décembre': '12',
+    jan: '01', fev: '02', 'fév': '02', mar: '03', avr: '04', mai: '05', jun: '06',
+    jui: '07', jul: '07', 'aoû': '08', aou: '08', sep: '09', oct: '10', nov: '11', 'déc': '12', dec: '12'
+  };
+  const monthNames = Object.keys(monthMap).sort((a, b) => b.length - a.length).join('|');
+  const dateRe = new RegExp(`(\\d{1,2})\\s+(${monthNames})\\w*\\s+(\\d{4})`, 'i');
   for (const line of raw.lines) {
-    const dm = line.match(/(\d{1,2})\s+(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)\s+(\d{4})/i);
+    const dm = line.match(dateRe);
     if (dm) {
-      matchDate = `${dm[3]}-${monthMap[dm[2].toLowerCase()]}-${dm[1].padStart(2, '0')}`;
-      break;
+      const key = dm[2].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      const monthNum = monthMap[dm[2].toLowerCase()] || monthMap[key];
+      if (monthNum) {
+        matchDate = `${dm[3]}-${monthNum}-${dm[1].padStart(2, '0')}`;
+        break;
+      }
     }
   }
 
