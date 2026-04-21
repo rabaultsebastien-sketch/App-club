@@ -495,104 +495,162 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
-  // Step 2: Search BOTH innerText AND DOM textContent for event keywords
+  // Step 2: Deep DOM analysis — find events AND minutes (::before, data-*, aria-*, sibling elements)
   const { eventBlocks, debugInfo } = await page.evaluate(() => {
-    const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|passe|buteur/i;
-    const MINUTE_RE = /^(\d{1,3})(?:\+(\d{1,2}))?\s*[''′'‛ ]?\s*$/;
+    const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|buteur/i;
 
-    // Gather ALL text from page — innerText (visible) + textContent of all leaf-ish nodes (hidden too)
-    const innerLines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
+    // Strategy 1: Look for __NEXT_DATA__ or similar JSON state
+    let jsonData = null;
+    for (const script of document.querySelectorAll('script')) {
+      const t = script.textContent;
+      if (t.includes('__NEXT_DATA__') || t.includes('"events"') || t.includes('"timeline"')) {
+        const sample = t.slice(0, 500);
+        if (/inscrit|averti|remplace/i.test(t)) jsonData = sample;
+      }
+    }
 
-    // Also collect text from DOM nodes (catches hidden/dynamic content)
-    const domTexts = new Set();
-    for (const el of document.querySelectorAll('div, span, p, li, td, article, section')) {
+    // Strategy 2: Find leaf elements with event keywords, then look for minutes
+    //  in: (a) ::before/::after, (b) data-* attributes, (c) aria-label, (d) sibling/parent text
+    const eventEls = [];
+    for (const el of document.querySelectorAll('div, span, p, li, td, article, section, strong, em, b')) {
       if (el.children.length > 8) continue;
       const t = el.textContent.trim();
-      if (t.length >= 8 && t.length <= 400 && KW.test(t)) domTexts.add(t);
+      if (t.length >= 8 && t.length <= 400 && KW.test(t)) {
+        // Get ::before and ::after content
+        let beforeContent = null, afterContent = null;
+        try {
+          const bc = getComputedStyle(el, '::before').content;
+          if (bc && bc !== 'none' && bc !== 'normal' && bc !== '""') beforeContent = bc;
+          const ac = getComputedStyle(el, '::after').content;
+          if (ac && ac !== 'none' && ac !== 'normal' && ac !== '""') afterContent = ac;
+        } catch (_) {}
+
+        // Walk up to 3 parent levels checking ::before and data attrs
+        let parentMinute = null;
+        let ancestor = el;
+        for (let depth = 0; depth < 4; depth++) {
+          ancestor = ancestor.parentElement;
+          if (!ancestor) break;
+          try {
+            const pbc = getComputedStyle(ancestor, '::before').content;
+            if (pbc && pbc !== 'none' && pbc !== 'normal' && pbc !== '""') {
+              const clean = pbc.replace(/['"]/g, '');
+              if (/^\d{1,3}/.test(clean)) parentMinute = clean;
+            }
+          } catch (_) {}
+          // Check data attributes
+          for (const attr of ancestor.attributes || []) {
+            if (/minute|time|chrono/i.test(attr.name) && /\d/.test(attr.value)) {
+              parentMinute = attr.value;
+            }
+          }
+          // Check sibling text elements for just-a-number
+          for (const sib of ancestor.children) {
+            const st = sib.textContent.trim();
+            if (/^\d{1,3}[''′']?\s*$/.test(st)) {
+              parentMinute = st.replace(/[^0-9+]/g, '');
+            }
+          }
+        }
+
+        // Check element's own data attributes
+        let elData = {};
+        for (const attr of el.attributes || []) {
+          if (attr.name.startsWith('data-') || attr.name === 'aria-label') {
+            elData[attr.name] = attr.value;
+          }
+        }
+
+        eventEls.push({
+          text: t.slice(0, 150),
+          tag: el.tagName,
+          cls: (el.className || '').toString().slice(0, 80),
+          before: beforeContent,
+          after: afterContent,
+          parentMinute,
+          data: Object.keys(elData).length > 0 ? elData : null
+        });
+      }
     }
 
-    // Merge: use innerText lines as primary, add unique DOM texts
-    const allTexts = [...innerLines];
-    for (const dt of domTexts) {
-      if (!allTexts.some(l => l.includes(dt) || dt.includes(l))) allTexts.push(dt);
+    // Strategy 3: Find ALL small elements with just digits (potential minute indicators)
+    const digitEls = [];
+    for (const el of document.querySelectorAll('span, div, p, td, time, b, strong, em, small')) {
+      const t = el.textContent.trim();
+      if (/^\d{1,3}[''′'+]?\s*$/.test(t) && parseInt(t) >= 1 && parseInt(t) <= 130) {
+        let parentText = '';
+        if (el.parentElement) {
+          parentText = el.parentElement.textContent.trim().slice(0, 100);
+        }
+        digitEls.push({ text: t, tag: el.tagName, cls: (el.className || '').toString().slice(0, 50), parentText });
+      }
     }
 
-    // Find lines with event keywords
-    const eventLineIdx = [];
-    for (let i = 0; i < allTexts.length; i++) {
-      if (KW.test(allTexts[i])) eventLineIdx.push(i);
+    // Strategy 4: Search innerHTML for minute-like patterns near event keywords
+    const html = document.body.innerHTML;
+    const htmlHints = [];
+    // Look for data attributes with minutes
+    const dataMinuteMatch = html.match(/data-\w*(?:minute|time|chrono)\w*="[^"]*"/gi);
+    if (dataMinuteMatch) htmlHints.push(...dataMinuteMatch.slice(0, 5));
+    // Look for "48" near "KEBE" (known event)
+    const kebeIdx = html.indexOf('KEBE');
+    if (kebeIdx > 0) {
+      htmlHints.push('KEBE context: ' + html.slice(Math.max(0, kebeIdx - 200), kebeIdx + 50).replace(/\s+/g, ' ').slice(0, 200));
     }
 
-    // Build event blocks: for each event line, look backward for minute
+    // Build event blocks from collected data
     const blocks = [];
-    const used = new Set();
-    for (const idx of eventLineIdx) {
-      if (used.has(idx)) continue;
-
+    const seen = new Set();
+    for (const ev of eventEls) {
+      if (seen.has(ev.text)) continue;
+      seen.add(ev.text);
       let minute = 0;
-      let minuteIdx = -1;
-
-      // Look for minute in previous 3 lines
-      for (let j = Math.max(0, idx - 3); j < idx; j++) {
-        const mm = allTexts[j].match(MINUTE_RE);
-        if (mm) {
-          const m = parseInt(mm[1]) + (mm[2] ? parseInt(mm[2]) : 0);
-          if (m >= 1 && m <= 130) { minute = m; minuteIdx = j; }
-        }
+      if (ev.parentMinute) {
+        const m = parseInt(ev.parentMinute);
+        if (m >= 1 && m <= 130) minute = m;
       }
-
-      // Also check concatenated: "90' Changement..." or "48Avertissement..."
-      if (!minute) {
-        const mm2 = allTexts[idx].match(/^(\d{1,3})(?:\+(\d{1,2}))?\s*[''′'‛]?\s*[A-ZÀ-Ÿa-z]/);
-        if (mm2) {
-          const m = parseInt(mm2[1]) + (mm2[2] ? parseInt(mm2[2]) : 0);
-          if (m >= 1 && m <= 130) minute = m;
-        }
+      if (!minute && ev.before) {
+        const m = parseInt(ev.before.replace(/['"]/g, ''));
+        if (m >= 1 && m <= 130) minute = m;
       }
-
-      // Collect text
-      const startIdx = minuteIdx >= 0 ? minuteIdx : idx;
-      const endIdx = Math.min(allTexts.length, idx + 5);
-      const parts = [];
-      for (let k = startIdx; k < endIdx; k++) {
-        if (used.has(k)) continue;
-        if (k !== startIdx && MINUTE_RE.test(allTexts[k])) break;
-        if (allTexts[k].length > 300) break;
-        parts.push(allTexts[k]);
-        used.add(k);
-      }
-
-      if (parts.length > 0) {
-        blocks.push({ minute, text: parts.join(' ').trim() });
-      }
+      blocks.push({ minute, text: ev.text });
     }
-
-    // Debug context
-    const sampleLines = allTexts.slice(0, 60);
-    const domEventSample = [...domTexts].slice(0, 20);
 
     return {
       eventBlocks: blocks,
       debugInfo: {
-        innerLineCount: innerLines.length,
-        domTextCount: domTexts.size,
-        totalTexts: allTexts.length,
-        eventLines: eventLineIdx.length,
-        sampleLines,
-        domEventSample
+        jsonData,
+        eventElCount: eventEls.length,
+        eventElSample: eventEls.slice(0, 10),
+        digitEls: digitEls.slice(0, 15),
+        htmlHints
       }
     };
   });
 
   if (isFirst) {
-    console.log(`   📊 innerText: ${debugInfo.innerLineCount} lignes | DOM texts: ${debugInfo.domTextCount} | Events: ${debugInfo.eventLines}`);
-    if (debugInfo.domEventSample.length > 0) {
-      console.log(`   🔍 DOM events trouvés:`);
-      for (const t of debugInfo.domEventSample) console.log(`      📝 ${t.slice(0, 100)}`);
+    if (debugInfo.jsonData) console.log(`   📡 JSON state found: ${debugInfo.jsonData.slice(0, 150)}`);
+    console.log(`   📊 ${debugInfo.eventElCount} éléments DOM avec mots-clés événement`);
+    console.log(`   🔍 Structure des événements DOM:`);
+    for (const ev of debugInfo.eventElSample) {
+      console.log(`      <${ev.tag} class="${ev.cls}">`);
+      console.log(`        text: ${ev.text.slice(0, 80)}`);
+      if (ev.before) console.log(`        ::before = ${ev.before}`);
+      if (ev.after) console.log(`        ::after = ${ev.after}`);
+      if (ev.parentMinute) console.log(`        parentMinute = ${ev.parentMinute}`);
+      if (ev.data) console.log(`        data = ${JSON.stringify(ev.data)}`);
     }
-    if (debugInfo.eventLines === 0) {
-      console.log(`   ⚠️ Aucun événement trouvé ! Lignes de la page:`);
-      for (const l of debugInfo.sampleLines) console.log(`      | ${l.slice(0, 90)}`);
+    if (debugInfo.digitEls.length > 0) {
+      console.log(`   🔢 ${debugInfo.digitEls.length} éléments avec chiffres (minutes?):`);
+      for (const d of debugInfo.digitEls) {
+        console.log(`      <${d.tag} class="${d.cls}"> "${d.text}" — parent: ${d.parentText.slice(0, 60)}`);
+      }
+    } else {
+      console.log(`   ⚠️ Aucun élément chiffre/minute trouvé dans le DOM`);
+    }
+    if (debugInfo.htmlHints.length > 0) {
+      console.log(`   🔎 HTML hints:`);
+      for (const h of debugInfo.htmlHints) console.log(`      ${h.slice(0, 120)}`);
     }
     console.log(`   📋 ${eventBlocks.length} blocs d'événements:`);
     for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 90)}`);
