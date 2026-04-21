@@ -465,7 +465,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   // ─── Extract events ───
   // Step 1: Click each tab to load dynamic content, scroll to trigger lazy-load
-  const tabNames = [‘le match’, ‘résumé’, ‘resume’, ‘composition’, ‘feuille’];
+  const tabNames = ['le match', 'résumé', 'resume', 'composition', 'feuille'];
   for (const tabName of tabNames) {
     await clickTab(page, [tabName]);
     await sleep(1500);
@@ -479,9 +479,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   // Expand "voir plus" / "voir tout" buttons
   try {
     await page.evaluate(() => {
-      document.querySelectorAll(‘button, a, span’).forEach(btn => {
+      document.querySelectorAll('button, a, span').forEach(btn => {
         const t = btn.textContent.trim().toLowerCase();
-        if (t.includes(‘voir plus’) || t.includes(‘voir tout’) || t.includes(‘afficher’) || t.includes(‘show more’)) btn.click();
+        if (t.includes('voir plus') || t.includes('voir tout') || t.includes('afficher') || t.includes('show more')) btn.click();
       });
     });
     await sleep(2000);
@@ -489,8 +489,8 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   if (isFirst) {
     try {
-      await page.screenshot({ path: path.join(DEBUG_DIR, ‘match-events.png’) });
-      fs.writeFileSync(path.join(DEBUG_DIR, ‘match-events.html’),
+      await page.screenshot({ path: path.join(DEBUG_DIR, 'match-events.png') });
+      fs.writeFileSync(path.join(DEBUG_DIR, 'match-events.html'),
         await page.evaluate(() => document.body.innerHTML));
     } catch (_) {}
   }
@@ -498,14 +498,14 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   // Step 2: Search BOTH innerText AND DOM textContent for event keywords
   const { eventBlocks, debugInfo } = await page.evaluate(() => {
     const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|passe|buteur/i;
-    const MINUTE_RE = /^(\d{1,3})(?:\+(\d{1,2}))?\s*[‘’′’‛ ]?\s*$/;
+    const MINUTE_RE = /^(\d{1,3})(?:\+(\d{1,2}))?\s*[''′'‛ ]?\s*$/;
 
     // Gather ALL text from page — innerText (visible) + textContent of all leaf-ish nodes (hidden too)
-    const innerLines = (document.body.innerText || ‘’).split(‘\n’).map(l => l.trim()).filter(l => l);
+    const innerLines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
 
     // Also collect text from DOM nodes (catches hidden/dynamic content)
     const domTexts = new Set();
-    for (const el of document.querySelectorAll(‘div, span, p, li, td, article, section’)) {
+    for (const el of document.querySelectorAll('div, span, p, li, td, article, section')) {
       if (el.children.length > 8) continue;
       const t = el.textContent.trim();
       if (t.length >= 8 && t.length <= 400 && KW.test(t)) domTexts.add(t);
@@ -541,9 +541,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
         }
       }
 
-      // Also check concatenated: "90’ Changement..." or "48Avertissement..."
+      // Also check concatenated: "90' Changement..." or "48Avertissement..."
       if (!minute) {
-        const mm2 = allTexts[idx].match(/^(\d{1,3})(?:\+(\d{1,2}))?\s*[‘’′’‛]?\s*[A-ZÀ-Ÿa-z]/);
+        const mm2 = allTexts[idx].match(/^(\d{1,3})(?:\+(\d{1,2}))?\s*[''′'‛]?\s*[A-ZÀ-Ÿa-z]/);
         if (mm2) {
           const m = parseInt(mm2[1]) + (mm2[2] ? parseInt(mm2[2]) : 0);
           if (m >= 1 && m <= 130) minute = m;
@@ -563,7 +563,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       }
 
       if (parts.length > 0) {
-        blocks.push({ minute, text: parts.join(‘ ‘).trim() });
+        blocks.push({ minute, text: parts.join(' ').trim() });
       }
     }
 
@@ -594,8 +594,8 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       console.log(`   ⚠️ Aucun événement trouvé ! Lignes de la page:`);
       for (const l of debugInfo.sampleLines) console.log(`      | ${l.slice(0, 90)}`);
     }
-    console.log(`   📋 ${eventBlocks.length} blocs d’événements:`);
-    for (const b of eventBlocks) console.log(`      📝 ${b.minute}’ ${b.text.slice(0, 90)}`);
+    console.log(`   📋 ${eventBlocks.length} blocs d'événements:`);
+    for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 90)}`);
   }
 
   // Player name lookup — map surname parts (≥3 chars) to player objects
