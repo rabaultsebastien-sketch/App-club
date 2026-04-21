@@ -281,13 +281,12 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   });
 
   // ─── Parse team names ───
-  // Blacklist words that indicate this is event text, not a team name
-  const isEventText = (s) => /changement|avertissement|but\s+pour|inscrit|averti|exclu|remplace|passeur|carton|voir plus|journée|\d+'/i.test(s);
+  const isEventText = (s) => /changement|avertissement|but\s+pour|inscrit|averti|exclu|remplace|passeur|carton|voir plus|journée|\d+'|résumé|vidéo|statistique|composition|feuille/i.test(s);
 
   let homeTeam = '', awayTeam = '';
   const urlSlug = matchUrl.split('/').slice(-2, -1)[0] || matchUrl.split('/').pop() || '';
 
-  // Strategy 1: team name elements (h1/h2/h3/[class*="team"]) — skip event-text pollution
+  // Strategy 1: team name elements — skip event text, navigation, and section headers
   for (const tn of raw.teamNames) {
     if (isEventText(tn) || tn.length < 4 || tn.length > 50) continue;
     if (!homeTeam) homeTeam = tn;
@@ -310,6 +309,21 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   const cleanTeam = (t) => (t || '').replace(/\s+\d+\s*$/, '').replace(/\s+/g, ' ').trim();
   homeTeam = cleanTeam(homeTeam);
   awayTeam = cleanTeam(awayTeam);
+
+  // Strategy 3: Extract team names from URL slug as reliable fallback
+  // URL format: "53441348-sporting-club-aubagne-air-bel-u-s-orleans-loiret-football"
+  if (!homeTeam || !awayTeam || isEventText(homeTeam) || isEventText(awayTeam)) {
+    const slug = urlSlug.replace(/^\d+-/, '');
+    const orleansMatch = slug.match(/(u-s-orleans[\w-]*)/);
+    if (orleansMatch) {
+      const parts = slug.split(orleansMatch[1]);
+      const homePart = parts[0].replace(/-+$/, '').replace(/-/g, ' ').trim().toUpperCase();
+      const awayPart = orleansMatch[1].replace(/-/g, ' ').trim().toUpperCase()
+        .replace(/LOIRET FOOTBALL$/, '').trim();
+      if (homePart.length >= 3) homeTeam = homeTeam || homePart;
+      if (awayPart.length >= 3) awayTeam = awayTeam || awayPart;
+    }
+  }
 
   // ─── Find score ───
   let scoreHome = '', scoreAway = '';

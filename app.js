@@ -1780,14 +1780,14 @@ function openFlashscorePreview(matches) {
 
         if (!squadP) continue;
 
-        const alreadyImported = (squadP.matches || []).some(em =>
-          em.date === m.date && em.opponent === m.opponent
+        const alreadyIdx = (squadP.matches || []).findIndex(em =>
+          em.date === m.date && (em.opponent === m.opponent || em.notes === 'Import FFF')
         );
-        if (alreadyImported) continue;
 
         squadP.matches = squadP.matches || [];
-        squadP.matches.push({
-          id: uid(),
+
+        const matchData = {
+          id: alreadyIdx >= 0 ? squadP.matches[alreadyIdx].id : uid(),
           date: m.date,
           opponent: m.opponent,
           venue: m.venue,
@@ -1800,7 +1800,13 @@ function openFlashscorePreview(matches) {
           yellowCards: Number(fp.yellowCards) || 0,
           redCards: Number(fp.redCards) || 0,
           notes: 'Import FFF'
-        });
+        };
+
+        if (alreadyIdx >= 0) {
+          squadP.matches[alreadyIdx] = matchData;
+        } else {
+          squadP.matches.push(matchData);
+        }
         added++;
       }
     });
