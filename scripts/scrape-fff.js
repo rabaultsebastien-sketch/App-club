@@ -22,7 +22,7 @@ const DEBUG_DIR = path.join(ROOT, '.cache', 'debug-fff');
 [OUTPUT_DIR, DEBUG_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 const FFF_URL = 'https://epreuves.fff.fr/competition/engagement/1-national/phase/1/1/resultats-et-calendrier';
-const CLUB_URL = 'https://epreuves.fff.fr/competition/club/504891-u-s-orleans-loiret-football/equipe/2025_2421_SEM_1/resultat-calendrier';
+const CLUB_URL = 'https://epreuves.fff.fr/competition/club/504891-u-s-orleans-loiret-football/equipe/2025_2421_SEM_1/saison';
 const TEAM_KEYWORDS = ['orléans', 'orleans'];
 const BASE_URL = 'https://epreuves.fff.fr';
 const TEST_MODE = process.argv.includes('--test');
@@ -87,12 +87,12 @@ function matchesTeam(text) {
     }
 
     // ─── All-matches mode (via --all flag) ───
-    // Uses the club "résultat-calendrier" page which lists all matches by month
+    // Uses the /saison page which lists ALL matches of the season at once
     if (ALL_MODE) {
-      console.log('🌐 Mode --all : ouverture page résultat-calendrier Orléans...');
+      console.log('🌐 Mode --all : ouverture page saison Orléans...');
       console.log(`   URL: ${CLUB_URL}`);
       await page.goto(CLUB_URL, { waitUntil: 'networkidle2', timeout: 45000 });
-      await sleep(3000);
+      await sleep(4000);
 
       // Accept cookies
       try {
@@ -100,161 +100,77 @@ function matchesTeam(text) {
         if (btn) { await btn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
       } catch (_) {}
 
-      // Debug: screenshot + save HTML
-      try {
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'calendar-page.png'), fullPage: true });
-        fs.writeFileSync(path.join(DEBUG_DIR, 'calendar-page.html'),
-          await page.evaluate(() => document.body.innerHTML));
-        console.log('📸 Debug: calendar-page.png sauvegardé');
-      } catch (_) {}
-
-      // Step 1: Expand all month sections (click all collapsed month headers)
-      console.log('\n📅 Expansion des sections par mois...');
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const expanded = await page.evaluate(() => {
-          let count = 0;
-          // FFF uses expandable sections — click headers/toggles that aren't expanded
-          const clickables = document.querySelectorAll(
-            '[class*="accordion"], [class*="collapse"], [class*="toggle"], ' +
-            '[class*="header"], [class*="month"], [class*="mois"], ' +
-            '[aria-expanded="false"], [class*="expand"], ' +
-            'mat-expansion-panel-header, .mat-expansion-panel-header, ' +
-            'mat-panel-title, .mat-panel-title'
-          );
-          for (const el of clickables) {
-            const t = el.textContent.trim().toLowerCase();
-            // Click month names (août, septembre, octobre, etc.) or expand buttons
-            if (/^(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre|janv|fév|avr|juil|sept|oct|nov|déc)/i.test(t)
-                || el.getAttribute('aria-expanded') === 'false') {
-              el.click();
-              count++;
-            }
-          }
-          return count;
-        });
-        if (expanded > 0) {
-          console.log(`   🔓 ${expanded} sections cliquées (tentative ${attempt + 1})`);
-          await sleep(2000);
-        } else if (attempt === 0) {
-          // Try clicking ALL clickable elements that contain month names
-          const expanded2 = await page.evaluate(() => {
-            let count = 0;
-            const months = ['janvier','février','mars','avril','mai','juin','juillet',
-                            'août','septembre','octobre','novembre','décembre'];
-            const allEls = document.querySelectorAll('div, button, a, span, h2, h3, h4, li, mat-panel-title');
-            for (const el of allEls) {
-              const t = el.textContent.trim().toLowerCase();
-              if (t.length > 3 && t.length < 40 && months.some(m => t.startsWith(m))) {
-                el.click();
-                count++;
-              }
-            }
-            return count;
-          });
-          if (expanded2 > 0) {
-            console.log(`   🔓 ${expanded2} mois cliqués`);
-            await sleep(2000);
-          } else {
-            break;
-          }
-        } else {
-          break;
-        }
-      }
-
-      // Step 2: Scroll the whole page to trigger lazy loading
-      console.log('📜 Scroll de la page...');
-      for (let scroll = 0; scroll < 15; scroll++) {
+      // Scroll the page fully to load all lazy content
+      console.log('📜 Chargement de la page...');
+      for (let scroll = 0; scroll < 20; scroll++) {
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await sleep(1000);
-        // Also click any "voir plus" buttons
-        await page.evaluate(() => {
-          const btns = document.querySelectorAll('button, a, [role="button"]');
-          for (const b of btns) {
-            const t = b.textContent.trim().toLowerCase();
-            if (t.includes('voir plus') || t.includes('afficher plus') || t.includes('charger plus')) {
-              b.click();
-            }
-          }
-        });
+        await sleep(1500);
       }
-      // Scroll back to top and then down again to ensure all content loaded
       await page.evaluate(() => window.scrollTo(0, 0));
       await sleep(1000);
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await sleep(2000);
 
-      // Debug: screenshot after expansion
+      // Debug: save HTML and screenshot
       try {
-        await page.screenshot({ path: path.join(DEBUG_DIR, 'calendar-expanded.png'), fullPage: true });
-        fs.writeFileSync(path.join(DEBUG_DIR, 'calendar-expanded.html'),
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'saison-page.png'), fullPage: true });
+        fs.writeFileSync(path.join(DEBUG_DIR, 'saison-page.html'),
           await page.evaluate(() => document.body.innerHTML));
+        console.log('📸 Debug: saison-page.png + .html sauvegardés');
       } catch (_) {}
 
-      // Step 3: Collect ALL links to match pages
+      // Dump first lines for debug
+      const pageLines = await page.evaluate(() => {
+        return document.body.innerText.split('\n').map(l => l.trim()).filter(l => l).slice(0, 80);
+      });
+      console.log(`\n📝 Contenu de la page (${pageLines.length} lignes):`);
+      for (const line of pageLines.slice(0, 50)) {
+        console.log(`   | ${line.slice(0, 120)}`);
+      }
+
+      // Collect ALL match links
       const allLinks = await page.evaluate((base) => {
         const results = [];
         const seen = new Set();
-        // Look for match links with various selectors
-        const selectors = [
-          'a[href*="/competition/match/"]',
-          'a[href*="/match/"]',
-          'a[routerlink*="match"]'
-        ];
-        for (const sel of selectors) {
-          document.querySelectorAll(sel).forEach(a => {
-            const href = a.getAttribute('href') || a.getAttribute('routerlink') || '';
-            if (!href || seen.has(href)) return;
-            seen.add(href);
-            const full = href.startsWith('http') ? href : base + href;
-            // Get context text for journée detection
-            const container = a.closest('div, tr, li, section, app-match-list-element, app-rencontre, [class*="match"], [class*="rencontre"]');
-            const text = container ? container.textContent.trim() : a.textContent.trim();
-            const jm = text.match(/journée\s+(\d+)/i) || text.match(/\bJ(\d+)\b/);
-            results.push({
-              url: full,
-              journee: jm ? parseInt(jm[1]) : 0,
-              text: text.slice(0, 150)
-            });
+        document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
+          const href = a.getAttribute('href') || '';
+          if (seen.has(href)) return;
+          seen.add(href);
+          const full = href.startsWith('http') ? href : base + href;
+          const container = a.closest('div, tr, li, section, [class*="match"], [class*="rencontre"]');
+          const text = container ? container.textContent.trim() : '';
+          const jm = text.match(/journée\s+(\d+)/i);
+          results.push({
+            url: full,
+            journee: jm ? parseInt(jm[1]) : 0,
+            text: text.slice(0, 150)
           });
-        }
+        });
         return results;
       }, BASE_URL);
 
-      console.log(`\n📋 ${allLinks.length} liens match trouvés sur la page`);
+      console.log(`\n📋 ${allLinks.length} liens match trouvés`);
       for (const l of allLinks) {
-        console.log(`   J${l.journee || '?'} → ${l.url.split('/').pop().slice(0, 60)} | ${l.text.slice(0, 60)}`);
+        console.log(`   J${l.journee || '?'} → ${l.url.split('/').pop().slice(0, 60)}`);
       }
 
-      // Step 4: Also dump all text from the page to debug
-      const pageText = await page.evaluate(() => {
-        return document.body.innerText.split('\n').map(l => l.trim()).filter(l => l).slice(0, 100);
-      });
-      console.log(`\n📝 Premières lignes de la page (${pageText.length}):`);
-      for (const line of pageText.slice(0, 40)) {
-        console.log(`   | ${line.slice(0, 100)}`);
-      }
-
-      // Filter to requested journées (if journée detected), otherwise scrape all
+      // Filter to requested journées
       let toScrape = allLinks;
       if (allLinks.some(l => l.journee > 0)) {
         const filtered = allLinks.filter(l => JOURNEES.includes(l.journee));
         if (filtered.length > 0) {
           toScrape = filtered;
-          console.log(`\n📋 ${toScrape.length} matchs filtrés pour journées ${JOURNEES.join(', ')}`);
+          console.log(`📋 ${toScrape.length} matchs pour les journées demandées`);
         }
       }
-
-      // Sort by journée
       toScrape.sort((a, b) => (a.journee || 99) - (b.journee || 99));
 
       console.log(`\n📋 Total: ${toScrape.length} matchs à scraper`);
 
+      // Scrape each match
       const allResults = [];
       for (let i = 0; i < toScrape.length; i++) {
         const { url, journee } = toScrape[i];
         const slug = url.split('/').pop().slice(0, 70);
-        console.log(`\n🔍 [${i + 1}/${toScrape.length}] ${journee ? 'J' + journee + ' ' : ''}${slug}...`);
+        console.log(`\n🔍 [${i + 1}/${toScrape.length}] J${journee || '?'} ${slug}...`);
 
         try {
           const detail = await scrapeMatchDetail(page, url, i === 0);
@@ -265,7 +181,6 @@ function matchesTeam(text) {
               console.log(`   ⏭️ Journée ${detectedJ} — exclue, on passe`);
               continue;
             }
-
             allResults.push(detail);
             const g = detail.players.reduce((s, p) => s + p.goals, 0);
             const c = detail.players.reduce((s, p) => s + p.yellowCards + p.redCards, 0);
