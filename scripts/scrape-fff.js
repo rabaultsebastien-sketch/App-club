@@ -426,7 +426,22 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       if (domScore) break;
     }
 
-    return { lines: lines.slice(0, 200), tableRows: tableRows.slice(0, 80), teamNames, title: document.title, domScore };
+    // Try to find date from DOM elements (Angular pages often put it in specific elements)
+    let domDate = '';
+    const dateEls = document.querySelectorAll('[class*="date"], [class*="Date"], time, [datetime], [class*="jour"], [class*="Jour"]');
+    for (const el of dateEls) {
+      const dt = el.getAttribute('datetime') || el.textContent.trim();
+      if (/\d{1,2}\s+[a-zéèêëàâùûôîïA-Z]{3,10}\s+\d{4}/.test(dt)) { domDate = dt; break; }
+      if (/\d{4}-\d{2}-\d{2}/.test(dt)) { domDate = dt; break; }
+    }
+    // Also check all text nodes for date patterns
+    if (!domDate) {
+      const allText = document.body.textContent || '';
+      const dm = allText.match(/(\d{1,2})\s+(janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre|jan|fev|fév|mar|avr|mai|jun|jui|jul|aou|aoû|sep|oct|nov|dec|déc)\s+(\d{4})/i);
+      if (dm) domDate = dm[0];
+    }
+
+    return { lines: lines.slice(0, 400), tableRows: tableRows.slice(0, 80), teamNames, title: document.title, domScore, domDate };
   });
 
   // ─── Parse team names ───
@@ -519,17 +534,30 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     jan: '01', fev: '02', mar: '03', avr: '04', jun: '06',
     jui: '07', jul: '07', aou: '08', sep: '09', oct: '10', nov: '11', dec: '12'
   };
-  for (const line of raw.lines) {
-    // Match "17 AVR 2026" or "17 avril 2026" — strip accents for lookup
-    const dm = line.match(/(\d{1,2})\s+([a-zA-ZéèêëàâùûôîïÉÈÊËÀÂÙÛÔÎÏ]{3,10})\s+(\d{4})/);
+  const tryParseDate = (text) => {
+    if (!text) return '';
+    const iso = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+    const dm = text.match(/(\d{1,2})\s+([a-zA-Z\u00e9\u00e8\u00ea\u00eb\u00e0\u00e2\u00f9\u00fb\u00f4\u00ee\u00ef\u00c9\u00c8\u00ca\u00cb\u00c0\u00c2\u00d9\u00db\u00d4\u00ce\u00cf]{3,10})\s+(\d{4})/);
     if (dm) {
-      const rawMonth = dm[2].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const monthNum = monthMap[rawMonth];
-      if (monthNum) {
-        matchDate = `${dm[3]}-${monthNum}-${dm[1].padStart(2, '0')}`;
-        break;
-      }
+      const rm = dm[2].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const mn = monthMap[rm];
+      if (mn) return `${dm[3]}-${mn}-${dm[1].padStart(2, '0')}`;
     }
+    return '';
+  };
+  // Strategy 1: DOM-detected date element
+  matchDate = tryParseDate(raw.domDate);
+  // Strategy 2: search page lines
+  if (!matchDate) {
+    for (const line of raw.lines) {
+      matchDate = tryParseDate(line);
+      if (matchDate) break;
+    }
+  }
+  // Strategy 3: search ALL body text (not limited to 400 lines)
+  if (!matchDate && raw.domDate) {
+    matchDate = tryParseDate(raw.domDate);
   }
   if (isFirst) {
     console.log(`   📅 Date: "${matchDate}"`);

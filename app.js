@@ -1790,9 +1790,11 @@ function openFlashscorePreview(matches) {
 
         if (!squadP) continue;
 
-        const alreadyIdx = (squadP.matches || []).findIndex(em =>
-          em.date === m.date && (em.opponent === m.opponent || em.notes === 'Import FFF')
-        );
+        const alreadyIdx = (squadP.matches || []).findIndex(em => {
+          if (em.round && m.round && em.round === m.round && em.opponent === m.opponent) return true;
+          if (em.date && m.date && em.date === m.date && em.opponent === m.opponent) return true;
+          return false;
+        });
 
         squadP.matches = squadP.matches || [];
 
