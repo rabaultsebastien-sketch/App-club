@@ -267,7 +267,17 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     // Also find team names from page title or main heading
     const titleMatch = document.title.match(/(.+?)\s*[-–vs]\s*(.+?)(?:\s*\||\s*$)/);
 
-    return { lines: lines.slice(0, 200), tableRows: tableRows.slice(0, 80), teamNames, title: document.title };
+    // Try to find score from DOM elements
+    let domScore = '';
+    for (const sel of ['[class*="score"]', '[class*="Score"]', '[class*="result"]', '[data-testid*="score"]']) {
+      for (const el of document.querySelectorAll(sel)) {
+        const t = el.textContent.trim();
+        if (/^\d{1,2}\s*[-–]\s*\d{1,2}$/.test(t)) { domScore = t; break; }
+      }
+      if (domScore) break;
+    }
+
+    return { lines: lines.slice(0, 200), tableRows: tableRows.slice(0, 80), teamNames, title: document.title, domScore };
   });
 
   // ─── Parse team names ───
@@ -303,15 +313,23 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   // ─── Find score ───
   let scoreHome = '', scoreAway = '';
-  for (const line of raw.lines) {
-    // Look for standalone score like "1 - 1" or "2 - 0"
-    const m = line.match(/^(\d{1,2})\s*[-–]\s*(\d{1,2})$/);
-    if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
+  // Strategy 1: DOM element with score class
+  if (raw.domScore) {
+    const m = raw.domScore.match(/(\d{1,2})\s*[-–]\s*(\d{1,2})/);
+    if (m) { scoreHome = m[1]; scoreAway = m[2]; }
   }
-  // Fallback: look for score near "score" or "résultat" labels
+  // Strategy 2: standalone "X - Y" line
   if (!scoreHome) {
     for (const line of raw.lines) {
-      const m = line.match(/(?:score|résultat|final)[\s:]*(\d{1,2})\s*[-–]\s*(\d{1,2})/i);
+      const m = line.match(/^(\d{1,2})\s*[-–]\s*(\d{1,2})$/);
+      if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
+    }
+  }
+  // Strategy 3: short line containing "X - Y" (not dates or journée)
+  if (!scoreHome) {
+    for (const line of raw.lines) {
+      if (line.length > 15 || /\d{4}/.test(line) || /journée/i.test(line)) continue;
+      const m = line.match(/(\d{1,2})\s*[-–]\s*(\d{1,2})/);
       if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
     }
   }
@@ -431,12 +449,10 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     redCards: 0
   }));
 
-  // ─── Extract events (goals, cards, subs, assists) ───
-  // Try "Résumé" tab (user-confirmed), then "Le match"
-  await clickTab(page, ['résumé', 'resume', 'le match']);
+  // ─── Extract events from RÉSUMÉ tab ───
+  await clickTab(page, ['résumé', 'resume']);
   await sleep(2000);
 
-  // Expand all events
   try {
     await page.evaluate(() => {
       document.querySelectorAll('button, a').forEach(btn => {
@@ -452,40 +468,39 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       await page.screenshot({ path: path.join(DEBUG_DIR, 'match-events.png') });
       fs.writeFileSync(path.join(DEBUG_DIR, 'match-events.html'),
         await page.evaluate(() => document.body.innerHTML));
-      console.log('   📸 Debug: .cache/debug-fff/match-events.{png,html}');
     } catch (_) {}
   }
 
-  // Collect raw event text blobs from the page (both DOM + innerText)
-  const rawEventTexts = await page.evaluate(() => {
-    const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|passe|buteur/i;
-    const texts = [];
-    const seen = new Set();
-
-    // Strategy 1: DOM textContent (captures concatenated text like "45inscrit par")
-    for (const el of document.querySelectorAll('div, span, li, p, td, article, section')) {
-      if (el.children.length > 10) continue;
-      const t = el.textContent.trim();
-      if (t.length >= 10 && t.length <= 500 && KW.test(t) && !seen.has(t)) {
-        seen.add(t);
-        texts.push(t);
+  // Parse innerText into event blocks: each starts with "XX' ..."
+  const eventBlocks = await page.evaluate(() => {
+    const lines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
+    const blocks = [];
+    let i = 0;
+    while (i < lines.length) {
+      const mm = lines[i].match(/^(\d{1,3})(?:\+(\d{1,2}))?['’′']\s*(.*)/);
+      if (mm) {
+        const minute = parseInt(mm[1]) + (mm[2] ? parseInt(mm[2]) : 0);
+        const parts = [mm[3] || ''];
+        i++;
+        let cont = 0;
+        while (i < lines.length && cont < 5) {
+          if (/^\d{1,3}['’′']/.test(lines[i])) break;
+          if (lines[i].length > 100) break;
+          parts.push(lines[i]);
+          i++;
+          cont++;
+        }
+        blocks.push({ minute, text: parts.join(' ').trim() });
+      } else {
+        i++;
       }
     }
-
-    // Strategy 2: innerText lines (catches text split across elements)
-    for (const line of (document.body.innerText || '').split('\n').map(l => l.trim())) {
-      if (line.length >= 10 && line.length <= 500 && KW.test(line) && !seen.has(line)) {
-        seen.add(line);
-        texts.push(line);
-      }
-    }
-
-    return texts;
+    return blocks;
   });
 
   if (isFirst) {
-    console.log(`   📊 ${rawEventTexts.length} événements bruts:`);
-    for (const t of rawEventTexts) console.log(`      📝 ${t.slice(0, 90)}`);
+    console.log(`   📊 ${eventBlocks.length} événements (blocs RÉSUMÉ):`);
+    for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 80)}`);
   }
 
   // Player name lookup — map surname parts (≥3 chars) to player objects
@@ -514,101 +529,58 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return best;
   }
 
-  function extractMinute(text) {
-    // FFF concatenation: "45inscrit", "45JIMMY" — digits right before a letter
-    let m = text.match(/(\d{1,3})(?:\+(\d{1,2}))?(?=[A-Za-zÀ-ÿ])/);
-    if (m) {
-      const min = parseInt(m[1]) + (m[2] ? parseInt(m[2]) : 0);
-      if (min >= 1 && min <= 130) return min;
-    }
-    // Fallback: digits with prime/apostrophe mark
-    m = text.match(/(\d{1,3})\s*[''′']/);
-    if (m && parseInt(m[1]) >= 1 && parseInt(m[1]) <= 130) return parseInt(m[1]);
-    return 0;
-  }
-
-  // Substring dedup: when the DOM + innerText dual-strategy captures the same event
-  // as "concatenated" (with minute) and "separated" (without minute), the separated
-  // forms are substrings of the concatenated form. Sort by length desc and skip
-  // any text that's already contained in a longer processed text.
-  const sortedTexts = [...rawEventTexts].sort((a, b) => b.length - a.length);
-  const processedTexts = [];
-  const dedupedTexts = [];
-  for (const t of sortedTexts) {
-    if (processedTexts.some(p => p.includes(t))) continue;
-    processedTexts.push(t);
-    dedupedTexts.push(t);
-  }
-  if (isFirst) console.log(`   🧹 ${dedupedTexts.length} événements après dedup substring (sur ${rawEventTexts.length})`);
-
-  // Classify events and apply to our players (dedup by type+player+~minute)
+  // Process each event block (minute comes from the block, no extraction needed)
   const appliedEvents = [];
-  const appliedKeys = new Set();
-  const applyOnce = (key, fn) => {
-    if (appliedKeys.has(key)) return false;
-    appliedKeys.add(key);
-    fn();
-    return true;
-  };
 
-  for (const text of dedupedTexts) {
-    const minute = extractMinute(text);
+  for (const block of eventBlocks) {
+    const { minute, text } = block;
 
     if (/inscrit\s*par|buteur/i.test(text) || (/\bbut\b/i.test(text) && !/remplace|changement/i.test(text))) {
-      // ⚽ Goal — prefer text after "inscrit par" for player matching
       const parts = text.split(/inscrit\s*par/i);
       const scorer = parts.length > 1 ? findPlayerInText(parts[parts.length - 1]) : findPlayerInText(text);
       if (scorer) {
-        applyOnce(`goal:${scorer.name}:${minute}`, () => {
-          scorer.goals++;
-          appliedEvents.push(`⚽ ${minute}' ${scorer.name}`);
-        });
+        scorer.goals++;
+        appliedEvents.push(`⚽ ${minute}' ${scorer.name}`);
       }
-      // Check for assist in same event
       const am = text.match(/pass(?:eur|e)\s+d[ée]cisiv[eo]?\s*(?:de|:)?\s*(.*)/i);
       if (am) {
         const assister = findPlayerInText(am[1]);
-        if (assister) applyOnce(`assist:${assister.name}:${minute}`, () => {
-          assister.assists++; appliedEvents.push(`🅰️ PD: ${assister.name}`);
-        });
+        if (assister) {
+          assister.assists++;
+          appliedEvents.push(`🅰️ ${minute}' PD: ${assister.name}`);
+        }
       }
 
     } else if ((/est\s+averti|avertissement|carton\s+jaune/i.test(text)) && !/exclu|rouge/i.test(text)) {
-      // 🟡 Yellow card — dedup per player regardless of minute (second yellow = red handled elsewhere)
       const player = findPlayerInText(text);
-      if (player) applyOnce(`yellow:${player.name}`, () => {
+      if (player) {
         player.yellowCards++;
         appliedEvents.push(`🟡 ${minute}' ${player.name}`);
-      });
+      }
 
     } else if (/est\s+exclu|carton\s+rouge/i.test(text)) {
-      // 🔴 Red card
       const player = findPlayerInText(text);
-      if (player) applyOnce(`red:${player.name}`, () => {
+      if (player) {
         player.redCards++;
         appliedEvents.push(`🔴 ${minute}' ${player.name}`);
-      });
+      }
 
     } else if (/remplace/i.test(text)) {
-      // 🔄 Substitution — split at "remplace" to identify in/out
       const parts = text.split(/remplace/i);
       const playerIn = findPlayerInText(parts[0]);
       const playerOut = parts.length > 1 ? findPlayerInText(parts[1]) : null;
-      const key = `sub:${playerIn ? playerIn.name : '?'}:${playerOut ? playerOut.name : '?'}`;
-      applyOnce(key, () => {
+      if (playerIn || playerOut) {
         if (playerOut && minute > 0) playerOut.minutes = minute;
         if (playerIn && minute > 0) playerIn.minutes = 90 - minute;
-        if (playerIn || playerOut)
-          appliedEvents.push(`🔄 ${minute}' ${playerIn ? playerIn.name : '?'} ← ${playerOut ? playerOut.name : '?'}`);
-      });
+        appliedEvents.push(`🔄 ${minute}' ${playerIn ? playerIn.name : '?'} ← ${playerOut ? playerOut.name : '?'}`);
+      }
 
     } else if (/pass(?:eur|e)\s+d[ée]cisiv/i.test(text)) {
-      // 🅰️ Standalone assist event
       const player = findPlayerInText(text);
-      if (player) applyOnce(`assist:${player.name}`, () => {
+      if (player) {
         player.assists++;
-        appliedEvents.push(`🅰️ PD: ${player.name}`);
-      });
+        appliedEvents.push(`🅰️ ${minute}' PD: ${player.name}`);
+      }
     }
   }
 
@@ -635,7 +607,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     venue: isHome ? 'Domicile' : 'Extérieur',
     opponent,
     players,
-    rawEvents: rawEventTexts
+    rawEvents: eventBlocks.map(b => `${b.minute}' ${b.text}`)
   };
 }
 
