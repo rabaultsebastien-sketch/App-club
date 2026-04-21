@@ -98,7 +98,44 @@ function matchesTeam(text) {
         if (btn) { await btn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
       } catch (_) {}
 
-      // Collect all match links from the club page
+      // Debug: screenshot + save HTML of club page
+      try {
+        await page.screenshot({ path: path.join(DEBUG_DIR, 'club-page.png'), fullPage: true });
+        fs.writeFileSync(path.join(DEBUG_DIR, 'club-page.html'),
+          await page.evaluate(() => document.body.innerHTML));
+        console.log('📸 Debug: club-page.png + club-page.html sauvegardés');
+      } catch (_) {}
+
+      // Scroll down to load lazy content + click "voir plus" buttons
+      let prevCount = 0;
+      for (let scroll = 0; scroll < 20; scroll++) {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await sleep(1500);
+        // Click any "voir plus" / "load more" / "afficher plus" buttons
+        const clicked = await page.evaluate(() => {
+          const btns = document.querySelectorAll('button, a, [role="button"]');
+          for (const b of btns) {
+            const t = b.textContent.trim().toLowerCase();
+            if (t.includes('voir plus') || t.includes('afficher plus') || t.includes('charger plus')
+                || t.includes('load more') || t.includes('plus de résultats')) {
+              b.click();
+              return true;
+            }
+          }
+          return false;
+        });
+        if (clicked) {
+          console.log(`   🔄 Clic "voir plus" (scroll ${scroll + 1})`);
+          await sleep(2000);
+        }
+        const curCount = await page.evaluate(() =>
+          document.querySelectorAll('a[href*="/competition/match/"]').length
+        );
+        if (curCount === prevCount && !clicked) break;
+        prevCount = curCount;
+      }
+
+      // Collect all match links
       const clubLinks = await page.evaluate((base) => {
         const links = [];
         const seen = new Set();
@@ -108,32 +145,215 @@ function matchesTeam(text) {
           seen.add(href);
           const full = href.startsWith('http') ? href : base + href;
           // Try to get journée number from surrounding text
-          const container = a.closest('tr, li, div');
+          const container = a.closest('tr, li, div, section');
           const text = container ? container.textContent : '';
-          const jm = text.match(/journée\s+(\d+)/i) || text.match(/J(\d+)/);
+          const jm = text.match(/journée\s+(\d+)/i) || text.match(/\bJ(\d+)\b/);
           const journee = jm ? parseInt(jm[1]) : 0;
-          links.push({ url: full, journee, text: text.trim().slice(0, 100) });
+          links.push({ url: full, journee, text: text.trim().slice(0, 120) });
         });
         return links;
       }, BASE_URL);
 
       console.log(`📋 ${clubLinks.length} liens match trouvés sur la page club`);
-
-      // If journée wasn't detected from container, try to extract from match page later
-      // Filter to requested journées
-      let toScrape = clubLinks;
-      if (clubLinks.some(l => l.journee > 0)) {
-        toScrape = clubLinks.filter(l => JOURNEES.includes(l.journee));
-        console.log(`📋 ${toScrape.length} matchs pour les journées demandées (${JOURNEES.join(', ')})`);
-      } else {
-        console.log('⚠️ Numéros de journée non détectés — scraping de tous les matchs');
+      for (const l of clubLinks) {
+        console.log(`   J${l.journee || '?'} → ${l.url.split('/').pop().slice(0, 60)}`);
       }
 
-      if (toScrape.length === 0) {
-        // Fallback: scrape all and filter by round after extraction
-        console.log('📋 Fallback: scraping de tous les matchs, filtrage par journée après extraction');
-        toScrape = clubLinks;
+      // If club page didn't yield enough matches, fall back to competition calendar
+      let toScrape = [];
+      if (clubLinks.length >= JOURNEES.length - 2) {
+        // Filter by journée if detected
+        if (clubLinks.some(l => l.journee > 0)) {
+          toScrape = clubLinks.filter(l => JOURNEES.includes(l.journee));
+        } else {
+          toScrape = clubLinks;
+        }
       }
+
+      // Fallback: navigate to competition calendar and find Orléans match per journée
+      if (toScrape.length < JOURNEES.length - 2) {
+        console.log(`\n📅 Fallback: navigation par journée sur la page calendrier...`);
+        await page.goto(FFF_URL, { waitUntil: 'networkidle2', timeout: 45000 });
+        await sleep(3000);
+
+        // Accept cookies again if needed
+        try {
+          const btn = await page.$('#didomi-notice-agree-button');
+          if (btn) { await btn.click(); await sleep(1000); }
+        } catch (_) {}
+
+        // Debug screenshot
+        try {
+          await page.screenshot({ path: path.join(DEBUG_DIR, 'calendar-page.png'), fullPage: true });
+          fs.writeFileSync(path.join(DEBUG_DIR, 'calendar-page.html'),
+            await page.evaluate(() => document.body.innerHTML));
+        } catch (_) {}
+
+        // Try to find journée navigation (dropdown, tabs, or links)
+        const journeeLinks = await page.evaluate((base, kws) => {
+          const results = [];
+
+          // Look for a select/dropdown with journée options
+          const selects = document.querySelectorAll('select');
+          for (const sel of selects) {
+            const opts = Array.from(sel.options);
+            const hasJournee = opts.some(o => /journée/i.test(o.text));
+            if (hasJournee) {
+              results.push({ type: 'select', selector: sel.name || sel.id || sel.className });
+            }
+          }
+
+          // Look for journée links/tabs
+          const allLinks = document.querySelectorAll('a, button, [role="tab"]');
+          for (const el of allLinks) {
+            const t = el.textContent.trim();
+            const m = t.match(/^(?:journée\s+)?(\d{1,2})$/i) || t.match(/^J(\d{1,2})$/i);
+            if (m) {
+              const href = el.getAttribute('href') || '';
+              results.push({
+                type: 'link',
+                journee: parseInt(m[1]),
+                href: href.startsWith('http') ? href : (href ? base + href : ''),
+                text: t
+              });
+            }
+          }
+
+          // Find all match links currently visible
+          const matchLinks = [];
+          document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
+            const href = a.getAttribute('href') || '';
+            const full = href.startsWith('http') ? href : base + href;
+            const container = a.closest('div, tr, li, section');
+            const ctxt = container ? container.textContent.toLowerCase() : '';
+            const isOrleans = kws.some(kw => full.toLowerCase().includes(kw) || ctxt.includes(kw));
+            if (isOrleans) matchLinks.push(full);
+          });
+
+          return { journeeNav: results, currentMatches: matchLinks };
+        }, BASE_URL, TEAM_KEYWORDS.map(k => k.toLowerCase()));
+
+        console.log(`   Navigation journées: ${journeeLinks.journeeNav.length} éléments trouvés`);
+        console.log(`   Matchs Orléans visibles: ${journeeLinks.currentMatches.length}`);
+        for (const j of journeeLinks.journeeNav.slice(0, 5)) {
+          console.log(`   → ${JSON.stringify(j)}`);
+        }
+
+        // Strategy A: if there are journée links/tabs, click each one
+        const journeeNavItems = journeeLinks.journeeNav.filter(j => j.type === 'link');
+        if (journeeNavItems.length >= 5) {
+          console.log(`\n📅 Stratégie: navigation par onglets journée (${journeeNavItems.length} trouvés)`);
+          const seen = new Set(toScrape.map(l => l.url));
+
+          for (const j of JOURNEES) {
+            const navItem = journeeNavItems.find(n => n.journee === j);
+            if (!navItem) {
+              console.log(`   J${j}: pas de lien trouvé, skip`);
+              continue;
+            }
+
+            // Click the journée tab/link
+            if (navItem.href) {
+              await page.goto(navItem.href, { waitUntil: 'networkidle2', timeout: 30000 });
+            } else {
+              await page.evaluate((jNum) => {
+                const els = document.querySelectorAll('a, button, [role="tab"]');
+                for (const el of els) {
+                  const t = el.textContent.trim();
+                  if (t === String(jNum) || t === `Journée ${jNum}` || t === `J${jNum}`) {
+                    el.click(); return;
+                  }
+                }
+              }, j);
+            }
+            await sleep(2000);
+
+            // Find Orléans match link on this journée
+            const matchUrl = await page.evaluate((base, kws) => {
+              const links = document.querySelectorAll('a[href*="/competition/match/"]');
+              for (const a of links) {
+                const href = a.getAttribute('href') || '';
+                const full = href.startsWith('http') ? href : base + href;
+                const container = a.closest('div, tr, li, section');
+                const ctxt = container ? container.textContent.toLowerCase() : '';
+                if (kws.some(kw => full.toLowerCase().includes(kw) || ctxt.includes(kw))) {
+                  return full;
+                }
+              }
+              return null;
+            }, BASE_URL, TEAM_KEYWORDS.map(k => k.toLowerCase()));
+
+            if (matchUrl && !seen.has(matchUrl)) {
+              seen.add(matchUrl);
+              toScrape.push({ url: matchUrl, journee: j });
+              console.log(`   J${j}: ✅ ${matchUrl.split('/').pop().slice(0, 50)}`);
+            } else if (matchUrl) {
+              console.log(`   J${j}: déjà trouvé`);
+            } else {
+              console.log(`   J${j}: ⚠️ pas de match Orléans`);
+            }
+          }
+        }
+        // Strategy B: scroll the calendar page and gather all visible Orléans matches
+        else {
+          console.log(`\n📅 Stratégie: scroll calendrier + collecte liens Orléans...`);
+          // Scroll to load everything
+          for (let scroll = 0; scroll < 30; scroll++) {
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await sleep(1000);
+            const clicked = await page.evaluate(() => {
+              const btns = document.querySelectorAll('button, a, [role="button"]');
+              for (const b of btns) {
+                const t = b.textContent.trim().toLowerCase();
+                if (t.includes('voir plus') || t.includes('afficher') || t.includes('charger')
+                    || t.includes('load more') || t.includes('plus de')) {
+                  b.click(); return true;
+                }
+              }
+              return false;
+            });
+            if (clicked) await sleep(2000);
+            else {
+              const h = await page.evaluate(() => document.body.scrollHeight);
+              const prev = await page.evaluate(() => window.__lastH || 0);
+              await page.evaluate((hh) => { window.__lastH = hh; }, h);
+              if (h === prev) break;
+            }
+          }
+
+          const allCalLinks = await page.evaluate((base, kws) => {
+            const results = [];
+            const seen = new Set();
+            document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
+              const href = a.getAttribute('href') || '';
+              if (seen.has(href)) return;
+              seen.add(href);
+              const full = href.startsWith('http') ? href : base + href;
+              const container = a.closest('div, tr, li, section');
+              const ctxt = container ? container.textContent.toLowerCase() : '';
+              if (kws.some(kw => full.toLowerCase().includes(kw) || ctxt.includes(kw))) {
+                const jm = ctxt.match(/journée\s+(\d+)/i);
+                results.push({ url: full, journee: jm ? parseInt(jm[1]) : 0 });
+              }
+            });
+            return results;
+          }, BASE_URL, TEAM_KEYWORDS.map(k => k.toLowerCase()));
+
+          console.log(`   ${allCalLinks.length} matchs Orléans trouvés sur le calendrier`);
+          const seen = new Set(toScrape.map(l => l.url));
+          for (const l of allCalLinks) {
+            if (!seen.has(l.url)) {
+              seen.add(l.url);
+              toScrape.push(l);
+            }
+          }
+        }
+      }
+
+      console.log(`\n📋 Total: ${toScrape.length} matchs à scraper`);
+
+      // Sort by journée if available
+      toScrape.sort((a, b) => (a.journee || 99) - (b.journee || 99));
 
       const allResults = [];
       for (let i = 0; i < toScrape.length; i++) {
@@ -165,7 +385,6 @@ function matchesTeam(text) {
           console.log(`   ❌ ${err.message}`);
         }
 
-        // Small delay between matches to be polite
         if (i < toScrape.length - 1) await sleep(2000);
       }
 
