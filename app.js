@@ -1728,8 +1728,8 @@ function openFlashscorePreview(matches) {
       round: m.round || '',
       title,
       score: `${m.scoreHome || '?'} - ${m.scoreAway || '?'}`,
-      scoreHome: isHome ? m.scoreHome : m.scoreAway,
-      scoreAway: isHome ? m.scoreAway : m.scoreHome,
+      scoreHome: String(isHome ? m.scoreHome : m.scoreAway) || '',
+      scoreAway: String(isHome ? m.scoreAway : m.scoreHome) || '',
       players: ourPlayers
     };
   });
