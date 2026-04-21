@@ -471,36 +471,85 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
-  // Parse innerText into event blocks: each starts with "XX' ..."
-  const eventBlocks = await page.evaluate(() => {
-    const lines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
+  // Parse events — try multiple strategies since FFF may use various DOM structures
+  const { eventBlocks, debugInfo } = await page.evaluate(() => {
+    const rawLines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
     const blocks = [];
-    let i = 0;
-    while (i < lines.length) {
-      const mm = lines[i].match(/^(\d{1,3})(?:\+(\d{1,2}))?['’′']\s*(.*)/);
-      if (mm) {
-        const minute = parseInt(mm[1]) + (mm[2] ? parseInt(mm[2]) : 0);
-        const parts = [mm[3] || ''];
-        i++;
-        let cont = 0;
-        while (i < lines.length && cont < 5) {
-          if (/^\d{1,3}['’′']/.test(lines[i])) break;
-          if (lines[i].length > 100) break;
-          parts.push(lines[i]);
-          i++;
-          cont++;
+
+    // Strategy A: find lines containing event keywords, and look backward for minute
+    const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|passe|buteur/i;
+    const MINUTE_RE = /^(\d{1,3})(?:\+(\d{1,2}))?\s*['’′'‛]?\s*$/;  // "90", "90'", "45+2"
+
+    // Find event keyword lines and their surrounding context
+    const eventLineIdx = [];
+    for (let i = 0; i < rawLines.length; i++) {
+      if (KW.test(rawLines[i])) eventLineIdx.push(i);
+    }
+
+    // For each event, try to find minute within 3 previous lines
+    const used = new Set();
+    for (const idx of eventLineIdx) {
+      if (used.has(idx)) continue;
+
+      // Look for minute in previous 3 lines
+      let minute = 0;
+      let minuteIdx = -1;
+      for (let j = Math.max(0, idx - 3); j < idx; j++) {
+        const mm = rawLines[j].match(MINUTE_RE);
+        if (mm) {
+          const m = parseInt(mm[1]) + (mm[2] ? parseInt(mm[2]) : 0);
+          if (m >= 1 && m <= 130) { minute = m; minuteIdx = j; }
         }
+      }
+
+      // Also check if minute is concatenated at start of the event line: "90' Changement pour..."
+      if (!minute) {
+        const mm2 = rawLines[idx].match(/^(\d{1,3})(?:\+(\d{1,2}))?\s*['’′'‛]\s*(.+)/);
+        if (mm2) {
+          const m = parseInt(mm2[1]) + (mm2[2] ? parseInt(mm2[2]) : 0);
+          if (m >= 1 && m <= 130) minute = m;
+        }
+      }
+
+      // Collect event text: from minute line (if any) through 4 lines after event line
+      const startIdx = minuteIdx >= 0 ? minuteIdx : idx;
+      const endIdx = Math.min(rawLines.length, idx + 4);
+      const parts = [];
+      for (let k = startIdx; k < endIdx; k++) {
+        if (used.has(k)) continue;
+        if (k !== startIdx && MINUTE_RE.test(rawLines[k])) break;  // next event
+        if (rawLines[k].length > 100) break;
+        parts.push(rawLines[k]);
+        used.add(k);
+      }
+
+      if (parts.length > 0) {
         blocks.push({ minute, text: parts.join(' ').trim() });
-      } else {
-        i++;
       }
     }
-    return blocks;
+
+    // Debug: sample of lines around first event
+    const firstEventIdx = eventLineIdx[0] || 0;
+    const contextStart = Math.max(0, firstEventIdx - 5);
+    const contextEnd = Math.min(rawLines.length, firstEventIdx + 25);
+    const sampleContext = rawLines.slice(contextStart, contextEnd);
+
+    return {
+      eventBlocks: blocks,
+      debugInfo: {
+        totalLines: rawLines.length,
+        eventLines: eventLineIdx.length,
+        sampleContext
+      }
+    };
   });
 
   if (isFirst) {
-    console.log(`   📊 ${eventBlocks.length} événements (blocs RÉSUMÉ):`);
-    for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 80)}`);
+    console.log(`   📊 ${debugInfo.totalLines} lignes, ${debugInfo.eventLines} avec mots-clés événements`);
+    console.log(`   🔍 Contexte autour du 1er événement:`);
+    for (const l of debugInfo.sampleContext) console.log(`      | ${l.slice(0, 90)}`);
+    console.log(`   📋 ${eventBlocks.length} blocs d'événements extraits:`);
+    for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 90)}`);
   }
 
   // Player name lookup — map surname parts (≥3 chars) to player objects
