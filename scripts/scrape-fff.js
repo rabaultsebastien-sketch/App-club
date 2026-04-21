@@ -495,7 +495,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   await page.evaluate(() => window.scrollTo(0, 0));
   await sleep(1000);
 
-  page.removeListener('response', responseHandler);
+  page.off('response', responseHandler);
 
   if (isFirst && apiCaptures.length > 0) {
     console.log(`   📡 ${apiCaptures.length} API response(s) avec données événements:`);
