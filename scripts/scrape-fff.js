@@ -138,9 +138,11 @@ function matchesTeam(text) {
           const container = a.closest('div, tr, li, section, [class*="match"], [class*="rencontre"]');
           const text = container ? container.textContent.trim() : '';
           const jm = text.match(/journée\s+(\d+)/i);
+          const isNational = /\bNATIONAL\b/i.test(text);
           results.push({
             url: full,
             journee: jm ? parseInt(jm[1]) : 0,
+            isNational,
             text: text.slice(0, 150)
           });
         });
@@ -149,18 +151,13 @@ function matchesTeam(text) {
 
       console.log(`\n📋 ${allLinks.length} liens match trouvés`);
       for (const l of allLinks) {
-        console.log(`   J${l.journee || '?'} → ${l.url.split('/').pop().slice(0, 60)}`);
+        const tag = l.isNational ? 'NAT' : 'autre';
+        console.log(`   J${l.journee || '?'} [${tag}] → ${l.url.split('/').pop().slice(0, 55)}`);
       }
 
-      // Filter to requested journées
-      let toScrape = allLinks;
-      if (allLinks.some(l => l.journee > 0)) {
-        const filtered = allLinks.filter(l => JOURNEES.includes(l.journee));
-        if (filtered.length > 0) {
-          toScrape = filtered;
-          console.log(`📋 ${toScrape.length} matchs pour les journées demandées`);
-        }
-      }
+      // Filter: only National championship matches in our journée list
+      let toScrape = allLinks.filter(l => l.isNational && JOURNEES.includes(l.journee));
+      console.log(`📋 ${toScrape.length} matchs National pour journées ${JOURNEES.join(', ')}`);
       toScrape.sort((a, b) => (a.journee || 99) - (b.journee || 99));
 
       console.log(`\n📋 Total: ${toScrape.length} matchs à scraper`);
