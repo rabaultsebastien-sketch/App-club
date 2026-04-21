@@ -778,8 +778,12 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   }
 
   // Filter to our team's events only (skip opponent events)
+  // Keep events that: a) are on our side or neutral, OR b) mention one of our players
   const opposingSide = ourSide === 'home' ? 'away' : 'home';
-  const ourEvents = eventBlocks.filter(b => b.side !== opposingSide);
+  const ourEvents = eventBlocks.filter(b => {
+    if (b.side !== opposingSide) return true;
+    return findPlayerInText(b.text) !== null;
+  });
 
   if (isFirst) {
     console.log(`   🎯 ${ourEvents.length} événements Orléans (sur ${eventBlocks.length} total)`);
