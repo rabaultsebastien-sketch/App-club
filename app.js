@@ -244,20 +244,28 @@ function openPlayerDetails(playerId) {
   const p = state.squad.find(x => x.id === playerId);
   if (!p) return;
   const t = totals(p.matches);
-  const rows = (p.matches || []).slice().sort((a, b) => b.date.localeCompare(a.date)).map(m => `
-    <tr>
+  const rows = (p.matches || []).slice().sort((a, b) => b.date.localeCompare(a.date)).map(m => {
+    const sh = Number(m.scoreHome), sa = Number(m.scoreAway);
+    let resultText = '', resultClass = '';
+    if (!isNaN(sh) && !isNaN(sa)) {
+      if (sh > sa) { resultText = `${sh} - ${sa} (V)`; resultClass = 'result-win'; }
+      else if (sh < sa) { resultText = `${sh} - ${sa} (D)`; resultClass = 'result-loss'; }
+      else { resultText = `${sh} - ${sa} (N)`; resultClass = 'result-draw'; }
+    }
+    return `<tr>
       <td>${m.date || ''}</td>
       <td>${escapeHtml(m.round || '')}</td>
-      <td>${escapeHtml(m.title || m.opponent || '')}</td>
-      <td class="num">${m.starter ? 'Titulaire' : 'Remplaçant'}</td>
+      <td>${escapeHtml(m.opponent || '')}</td>
+      <td class="num ${resultClass}">${resultText}</td>
+      <td class="num">${m.starter ? 'Titu' : 'Rempl'}</td>
       <td class="num">${m.minutes}'</td>
       <td class="num">${m.goals}</td>
       <td class="num">${m.assists}</td>
       <td class="num">${m.yellowCards || 0}</td>
       <td class="num">${m.redCards || 0}</td>
       <td><button class="btn small ghost" data-del-match="${m.id}">✕</button></td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
   openModal(`
     <h3>${escapeHtml(p.firstName)} ${escapeHtml(p.lastName)}</h3>
     <div class="card-sub">${p.age ? p.age + ' ans · ' : ''}${escapeHtml(p.position || '')}${p.number ? ' · #' + p.number : ''}</div>
@@ -276,7 +284,7 @@ function openPlayerDetails(playerId) {
     <div class="matches-section">
       <h4>Historique des matchs</h4>
       ${rows ? `<table class="matches-table">
-        <thead><tr><th>Date</th><th>Journée</th><th>Match</th><th>Rôle</th><th>Min</th><th>B</th><th>PD</th><th>🟨</th><th>🟥</th><th></th></tr></thead>
+        <thead><tr><th>Date</th><th>Journée</th><th>Adversaire</th><th>Résultat</th><th>Rôle</th><th>Min</th><th>B</th><th>PD</th><th>🟨</th><th>🟥</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>` : `<div class="empty">Aucun match enregistré.</div>`}
     </div>
@@ -1720,6 +1728,8 @@ function openFlashscorePreview(matches) {
       round: m.round || '',
       title,
       score: `${m.scoreHome || '?'} - ${m.scoreAway || '?'}`,
+      scoreHome: isHome ? m.scoreHome : m.scoreAway,
+      scoreAway: isHome ? m.scoreAway : m.scoreHome,
       players: ourPlayers
     };
   });
@@ -1793,6 +1803,8 @@ function openFlashscorePreview(matches) {
           venue: m.venue,
           round: m.round || '',
           title: m.title || '',
+          scoreHome: m.scoreHome || '',
+          scoreAway: m.scoreAway || '',
           starter: fp.starter !== false,
           minutes: Number(fp.minutes) || 0,
           goals: Number(fp.goals) || 0,

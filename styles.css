@@ -254,6 +254,9 @@ table.matches-table th {
   text-transform: uppercase;
 }
 table.matches-table td.num { text-align: center; }
+table.matches-table td.result-win { color: #22c55e; font-weight: 600; }
+table.matches-table td.result-draw { color: #f59e0b; font-weight: 600; }
+table.matches-table td.result-loss { color: #ef4444; font-weight: 600; }
 
 /* ========= PROJECTION ========= */
 .projection-summary {
