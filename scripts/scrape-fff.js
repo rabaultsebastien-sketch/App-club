@@ -507,7 +507,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       // Get team side from .action element class
       const actionEl = el.querySelector('.action');
       const side = actionEl
-        ? (actionEl.classList.contains('visiteur') ? 'away' : 'recevant' in actionEl.classList ? 'home' : '')
+        ? (actionEl.classList.contains('visiteur') ? 'away' : actionEl.classList.contains('recevant') ? 'home' : '')
         : '';
 
       if (text.length > 5) {
@@ -555,7 +555,14 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     const n = normName(text);
     let best = null, bestLen = 0;
     for (const [key, player] of Object.entries(playersByName)) {
-      if (key.length >= 3 && n.includes(key) && key.length > bestLen) {
+      if (key.length < 3) continue;
+      const idx = n.indexOf(key);
+      if (idx < 0) continue;
+      // Word boundary: char before and after must be non-letter (or start/end)
+      const before = idx > 0 ? n[idx - 1] : ' ';
+      const after = idx + key.length < n.length ? n[idx + key.length] : ' ';
+      if (/[a-z]/.test(before) || /[a-z]/.test(after)) continue;
+      if (key.length > bestLen) {
         best = player;
         bestLen = key.length;
       }
@@ -563,10 +570,18 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return best;
   }
 
-  // Process each event block (minute comes from the block, no extraction needed)
+  // Filter to our team's events only (skip opponent events)
+  const opposingSide = ourSide === 'home' ? 'away' : 'home';
+  const ourEvents = eventBlocks.filter(b => b.side !== opposingSide);
+
+  if (isFirst) {
+    console.log(`   🎯 ${ourEvents.length} événements Orléans (sur ${eventBlocks.length} total)`);
+  }
+
+  // Process each event block
   const appliedEvents = [];
 
-  for (const block of eventBlocks) {
+  for (const block of ourEvents) {
     const { minute, text } = block;
 
     if (/inscrit\s*par|buteur/i.test(text) || (/\bbut\b/i.test(text) && !/remplace|changement/i.test(text))) {
