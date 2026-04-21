@@ -463,47 +463,20 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     redCards: 0
   }));
 
-  // ─── Extract events ───
-  // Set up API response listener to capture JSON event data from Angular app
-  const apiCaptures = [];
-  const responseHandler = async (response) => {
-    const url = response.url();
-    const ct = response.headers()['content-type'] || '';
-    if (ct.includes('json') || url.includes('api') || url.includes('match')) {
-      try {
-        const body = await response.text();
-        if (/minute|inscrit|averti|remplace|buteur|changement/i.test(body) && body.length < 50000) {
-          apiCaptures.push({ url: url.slice(0, 150), body });
-        }
-      } catch (_) {}
-    }
-  };
-  page.on('response', responseHandler);
+  // ─── Extract events from Angular <app-moment-fort> components ───
+  // The FFF page is an Angular app. Events are inside <app-moment-fort> elements:
+  //   <app-moment-fort class="match ng-star-inserted">
+  //     <span class="timer text-bold-sm">48'</span>
+  //     <div class="content">
+  //       <div class="action visiteur ng-star-inserted">
+  //         <span class="text-base">Avertissement pour ORLEANS US 45</span>
+  //         <span class="text-sm">KOUROUFIA KEBE est averti</span>
+  //       </div>
+  //     </div>
+  //   </app-moment-fort>
 
-  // Reload the page to capture API calls
-  await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-  await sleep(3000);
-
-  // Click tabs to load event content
-  for (const tabName of ['le match', 'résumé']) {
-    await clickTab(page, [tabName]);
-    await sleep(2000);
-  }
-  // Scroll to trigger lazy loading
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  // Wait for events to render (no tab click needed — they're on the default view)
   await sleep(2000);
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await sleep(1000);
-
-  page.off('response', responseHandler);
-
-  if (isFirst && apiCaptures.length > 0) {
-    console.log(`   📡 ${apiCaptures.length} API response(s) avec données événements:`);
-    for (const c of apiCaptures) {
-      console.log(`      URL: ${c.url}`);
-      console.log(`      Body (200 chars): ${c.body.slice(0, 200)}`);
-    }
-  }
 
   if (isFirst) {
     try {
@@ -513,111 +486,55 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
-  // Deep DOM analysis: get outerHTML of event ancestor to find minute structure
-  const { eventBlocks, debugInfo } = await page.evaluate(() => {
-    const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|buteur/i;
+  const eventBlocks = await page.evaluate(() => {
+    const blocks = [];
 
-    // Find event containers and get their ANCESTOR outerHTML
-    const ancestorHTMLs = [];
-    const seenAncestors = new Set();
-    for (const el of document.querySelectorAll('*')) {
-      if (el.children.length > 8) continue;
-      const t = el.textContent.trim();
-      if (t.length < 8 || t.length > 400 || !KW.test(t)) continue;
-
-      // Walk up to find the event row container (stop at 5 levels)
-      let ancestor = el;
-      for (let i = 0; i < 5; i++) {
-        if (!ancestor.parentElement) break;
-        ancestor = ancestor.parentElement;
-        // Stop at a meaningful container (has multiple children, likely the event row)
-        if (ancestor.children.length >= 2 && ancestor.children.length <= 8) break;
+    // Primary: query Angular <app-moment-fort> components
+    const moments = document.querySelectorAll('app-moment-fort');
+    for (const el of moments) {
+      // Get minute from .timer span
+      const timerEl = el.querySelector('[class*="timer"], .timer');
+      let minute = 0;
+      if (timerEl) {
+        const m = timerEl.textContent.trim().match(/(\d+)/);
+        if (m) minute = parseInt(m[1]);
       }
 
-      const key = ancestor.outerHTML.slice(0, 100);
-      if (!seenAncestors.has(key)) {
-        seenAncestors.add(key);
-        ancestorHTMLs.push(ancestor.outerHTML.slice(0, 600));
-        if (ancestorHTMLs.length >= 3) break;
+      // Get event text from .content div
+      const contentEl = el.querySelector('.content');
+      const text = contentEl ? contentEl.textContent.trim() : el.textContent.trim();
+
+      // Get team side from .action element class
+      const actionEl = el.querySelector('.action');
+      const side = actionEl
+        ? (actionEl.classList.contains('visiteur') ? 'away' : 'recevant' in actionEl.classList ? 'home' : '')
+        : '';
+
+      if (text.length > 5) {
+        blocks.push({ minute, text, side });
       }
     }
 
-    // Also: search ALL elements (including custom Angular components) for digit text
-    const allDigitEls = [];
-    for (const el of document.querySelectorAll('*')) {
-      const t = el.textContent.trim();
-      if (el.children.length === 0 && /^\d{1,3}['′']?\s*$/.test(t)) {
-        const num = parseInt(t);
-        if (num >= 1 && num <= 130) {
-          const parentCls = el.parentElement ? (el.parentElement.className || '').toString().slice(0, 40) : '';
-          const parentTag = el.parentElement ? el.parentElement.tagName : '';
-          allDigitEls.push({
-            text: t, tag: el.tagName, cls: (el.className || '').toString().slice(0, 40),
-            parentTag, parentCls
-          });
+    // Fallback: if no <app-moment-fort> found, search DOM broadly
+    if (blocks.length === 0) {
+      const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|buteur/i;
+      const seen = new Set();
+      for (const el of document.querySelectorAll('div, span, p, li, td')) {
+        if (el.children.length > 8) continue;
+        const t = el.textContent.trim();
+        if (t.length >= 8 && t.length <= 400 && KW.test(t) && !seen.has(t)) {
+          seen.add(t);
+          blocks.push({ minute: 0, text: t, side: '' });
         }
       }
     }
 
-    // Search innerHTML for "48" (KEBE's minute) in broader context
-    const html = document.body.innerHTML;
-    const htmlHints = [];
-    // Find "48" near event-related content
-    const re48 = /[^0-9]48[^0-9]/g;
-    let match;
-    while ((match = re48.exec(html)) !== null) {
-      const context = html.slice(Math.max(0, match.index - 50), match.index + 60).replace(/\s+/g, ' ');
-      if (/event|action|minute|time|chrono|averti|change|content|ng-star/i.test(context)) {
-        htmlHints.push(context);
-      }
-      if (htmlHints.length >= 5) break;
-    }
-
-    // Build blocks from DOM text (same as before, but deduplicated)
-    const blocks = [];
-    const seen = new Set();
-    for (const el of document.querySelectorAll('div, span, p, li, td')) {
-      if (el.children.length > 8) continue;
-      const t = el.textContent.trim();
-      if (t.length >= 8 && t.length <= 400 && KW.test(t) && !seen.has(t)) {
-        seen.add(t);
-        blocks.push({ minute: 0, text: t });
-      }
-    }
-
-    return {
-      eventBlocks: blocks,
-      debugInfo: {
-        ancestorHTMLs,
-        allDigitEls: allDigitEls.slice(0, 20),
-        htmlHints
-      }
-    };
+    return blocks;
   });
 
   if (isFirst) {
-    console.log(`   🏗️ HTML structure des 3 premiers événements:`);
-    for (const h of debugInfo.ancestorHTMLs) {
-      console.log(`      ${h.replace(/\n/g, ' ').slice(0, 200)}`);
-      console.log('      ---');
-    }
-    if (debugInfo.allDigitEls.length > 0) {
-      console.log(`   🔢 ${debugInfo.allDigitEls.length} éléments chiffres (tout sélecteur *):`);
-      for (const d of debugInfo.allDigitEls) {
-        console.log(`      <${d.tag} class="${d.cls}"> "${d.text}" — parent: <${d.parentTag} class="${d.parentCls}">`);
-      }
-    } else {
-      console.log(`   ⚠️ AUCUN élément digit trouvé dans tout le DOM`);
-    }
-    if (debugInfo.htmlHints.length > 0) {
-      console.log(`   🔎 "48" trouvé dans le HTML près de contenu événement:`);
-      for (const h of debugInfo.htmlHints) console.log(`      ${h.slice(0, 150)}`);
-    } else {
-      console.log(`   ⚠️ "48" non trouvé dans le HTML près de mots-clés événement`);
-    }
-    console.log(`   📋 ${eventBlocks.length} blocs d'événements (sans minutes):`);
-    for (const b of eventBlocks.slice(0, 5)) console.log(`      📝 ${b.text.slice(0, 90)}`);
-    if (eventBlocks.length > 5) console.log(`      ... et ${eventBlocks.length - 5} de plus`);
+    console.log(`   📊 ${eventBlocks.length} événements <app-moment-fort>:`);
+    for (const b of eventBlocks) console.log(`      ${b.minute}' [${b.side}] ${b.text.slice(0, 80)}`);
   }
 
   // Player name lookup — map surname parts (≥3 chars) to player objects
