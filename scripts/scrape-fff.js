@@ -382,7 +382,14 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       }
     }
   }
-  if (isFirst) console.log(`   📅 Date: "${matchDate}" (lignes scannées: ${raw.lines.length})`);
+  if (isFirst) {
+    console.log(`   📅 Date: "${matchDate}" (lignes scannées: ${raw.lines.length})`);
+    if (!matchDate) {
+      const dateCandidates = raw.lines.filter(l => /\d{4}/.test(l) || /20\d{2}/.test(l) || /avr|mar|fev|jan|mai|jun|jui|aou|sep|oct|nov|dec/i.test(l));
+      console.log(`   📅 Lignes candidates (année ou mois):`);
+      for (const c of dateCandidates.slice(0, 5)) console.log(`      | ${c.slice(0, 80)}`);
+    }
+  }
 
   // ─── Find round ───
   let round = '';
