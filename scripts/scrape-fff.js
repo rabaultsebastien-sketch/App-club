@@ -135,8 +135,31 @@ function matchesTeam(text) {
           if (seen.has(href)) return;
           seen.add(href);
           const full = href.startsWith('http') ? href : base + href;
-          const container = a.closest('div, tr, li, section, [class*="match"], [class*="rencontre"]');
-          const text = container ? container.textContent.trim() : '';
+          // Walk up parents until we find text with "Journée" or "NATIONAL" (up to 8 levels)
+          let text = '';
+          let el = a;
+          for (let lvl = 0; lvl < 8; lvl++) {
+            el = el.parentElement;
+            if (!el) break;
+            const t = el.textContent.trim();
+            if (/journée\s+\d+/i.test(t)) { text = t; break; }
+          }
+          if (!text) {
+            // Fallback: also check previous siblings of parent elements
+            el = a;
+            for (let lvl = 0; lvl < 6; lvl++) {
+              el = el.parentElement;
+              if (!el) break;
+              const prev = el.previousElementSibling;
+              if (prev) {
+                const pt = prev.textContent.trim();
+                if (/journée\s+\d+/i.test(pt) || /NATIONAL/i.test(pt)) {
+                  text = pt + ' ' + el.textContent.trim();
+                  break;
+                }
+              }
+            }
+          }
           const jm = text.match(/journée\s+(\d+)/i);
           const isNational = /\bNATIONAL\b/i.test(text);
           results.push({
