@@ -7,6 +7,7 @@
    Usage :
      node scripts/scrape-fff.js          # matchs récents
      node scripts/scrape-fff.js --test   # 1 seul match (debug)
+     node scripts/scrape-fff.js --all    # toutes les journées (1-27, 29)
    ============================================================= */
 
 const puppeteer = require('puppeteer-extra');
@@ -21,9 +22,12 @@ const DEBUG_DIR = path.join(ROOT, '.cache', 'debug-fff');
 [OUTPUT_DIR, DEBUG_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 const FFF_URL = 'https://epreuves.fff.fr/competition/engagement/1-national/phase/1/1/resultats-et-calendrier';
+const CLUB_URL = 'https://epreuves.fff.fr/competition/club/504891-u-s-orleans-loiret-football/equipe/2025_2421_SEM_1/equipe';
 const TEAM_KEYWORDS = ['orléans', 'orleans'];
 const BASE_URL = 'https://epreuves.fff.fr';
 const TEST_MODE = process.argv.includes('--test');
+const ALL_MODE = process.argv.includes('--all');
+const JOURNEES = [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,29];
 const URL_IDX = process.argv.indexOf('--url');
 const SINGLE_URL = URL_IDX !== -1 ? process.argv[URL_IDX + 1] : null;
 
@@ -77,6 +81,103 @@ function matchesTeam(text) {
       } else {
         console.log('   ⚠️ Pas de données');
       }
+      console.log('\n(Fermez Chrome pour terminer)');
+      await new Promise(r => browser.on('disconnected', r));
+      return;
+    }
+
+    // ─── All-matches mode (via --all flag) ───
+    if (ALL_MODE) {
+      console.log('🌐 Mode --all : ouverture page club Orléans...');
+      await page.goto(CLUB_URL, { waitUntil: 'networkidle2', timeout: 45000 });
+      await sleep(3000);
+
+      // Accept cookies
+      try {
+        const btn = await page.$('#didomi-notice-agree-button');
+        if (btn) { await btn.click(); await sleep(1000); console.log('🍪 Cookies acceptés'); }
+      } catch (_) {}
+
+      // Collect all match links from the club page
+      const clubLinks = await page.evaluate((base) => {
+        const links = [];
+        const seen = new Set();
+        document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
+          const href = a.getAttribute('href') || '';
+          if (seen.has(href)) return;
+          seen.add(href);
+          const full = href.startsWith('http') ? href : base + href;
+          // Try to get journée number from surrounding text
+          const container = a.closest('tr, li, div');
+          const text = container ? container.textContent : '';
+          const jm = text.match(/journée\s+(\d+)/i) || text.match(/J(\d+)/);
+          const journee = jm ? parseInt(jm[1]) : 0;
+          links.push({ url: full, journee, text: text.trim().slice(0, 100) });
+        });
+        return links;
+      }, BASE_URL);
+
+      console.log(`📋 ${clubLinks.length} liens match trouvés sur la page club`);
+
+      // If journée wasn't detected from container, try to extract from match page later
+      // Filter to requested journées
+      let toScrape = clubLinks;
+      if (clubLinks.some(l => l.journee > 0)) {
+        toScrape = clubLinks.filter(l => JOURNEES.includes(l.journee));
+        console.log(`📋 ${toScrape.length} matchs pour les journées demandées (${JOURNEES.join(', ')})`);
+      } else {
+        console.log('⚠️ Numéros de journée non détectés — scraping de tous les matchs');
+      }
+
+      if (toScrape.length === 0) {
+        // Fallback: scrape all and filter by round after extraction
+        console.log('📋 Fallback: scraping de tous les matchs, filtrage par journée après extraction');
+        toScrape = clubLinks;
+      }
+
+      const allResults = [];
+      for (let i = 0; i < toScrape.length; i++) {
+        const { url, journee } = toScrape[i];
+        const slug = url.split('/').pop().slice(0, 70);
+        console.log(`\n🔍 [${i + 1}/${toScrape.length}] ${journee ? 'J' + journee + ' ' : ''}${slug}...`);
+
+        try {
+          const detail = await scrapeMatchDetail(page, url, i === 0);
+          if (detail && detail.players.length > 0) {
+            // Check if this journée is in our list
+            const roundMatch = detail.round.match(/(\d+)/);
+            const detectedJ = roundMatch ? parseInt(roundMatch[1]) : 0;
+            if (detectedJ > 0 && !JOURNEES.includes(detectedJ)) {
+              console.log(`   ⏭️ Journée ${detectedJ} — exclue, on passe`);
+              continue;
+            }
+
+            allResults.push(detail);
+            const g = detail.players.reduce((s, p) => s + p.goals, 0);
+            const c = detail.players.reduce((s, p) => s + p.yellowCards + p.redCards, 0);
+            const starters = detail.players.filter(p => p.starter).length;
+            const subs = detail.players.filter(p => !p.starter).length;
+            console.log(`   ✅ ${detail.players.length} joueurs (${starters} titu + ${subs} rempl.) | ${g} but(s), ${c} carton(s)`);
+          } else {
+            console.log('   ⚠️ Pas de données');
+          }
+        } catch (err) {
+          console.log(`   ❌ ${err.message}`);
+        }
+
+        // Small delay between matches to be polite
+        if (i < toScrape.length - 1) await sleep(2000);
+      }
+
+      if (allResults.length > 0) {
+        const stamp = new Date().toISOString().slice(0, 10);
+        const outFile = path.join(OUTPUT_DIR, `fff-orleans-all-${stamp}.json`);
+        fs.writeFileSync(outFile, JSON.stringify(allResults, null, 2));
+        console.log(`\n✅ ${allResults.length} match(s) → ${outFile}`);
+      } else {
+        console.log('\n⚠️ Aucune donnée extraite.');
+      }
+
       console.log('\n(Fermez Chrome pour terminer)');
       await new Promise(r => browser.on('disconnected', r));
       return;
@@ -650,7 +751,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       const playerOut = parts.length > 1 ? findPlayerInText(parts[1]) : null;
       if (playerIn || playerOut) {
         if (playerOut && minute > 0) playerOut.minutes = minute;
-        if (playerIn && minute > 0) playerIn.minutes = 90 - minute;
+        if (playerIn && minute > 0) playerIn.minutes = Math.max(1, 90 - minute);
         appliedEvents.push(`🔄 ${minute}' ${playerIn ? playerIn.name : '?'} ← ${playerOut ? playerOut.name : '?'}`);
       }
 
