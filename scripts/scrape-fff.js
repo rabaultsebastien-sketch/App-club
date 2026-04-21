@@ -464,28 +464,46 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   }));
 
   // ─── Extract events ───
-  // Step 1: Click each tab to load dynamic content, scroll to trigger lazy-load
-  const tabNames = ['le match', 'résumé', 'resume', 'composition', 'feuille'];
-  for (const tabName of tabNames) {
+  // Set up API response listener to capture JSON event data from Angular app
+  const apiCaptures = [];
+  const responseHandler = async (response) => {
+    const url = response.url();
+    const ct = response.headers()['content-type'] || '';
+    if (ct.includes('json') || url.includes('api') || url.includes('match')) {
+      try {
+        const body = await response.text();
+        if (/minute|inscrit|averti|remplace|buteur|changement/i.test(body) && body.length < 50000) {
+          apiCaptures.push({ url: url.slice(0, 150), body });
+        }
+      } catch (_) {}
+    }
+  };
+  page.on('response', responseHandler);
+
+  // Reload the page to capture API calls
+  await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+  await sleep(3000);
+
+  // Click tabs to load event content
+  for (const tabName of ['le match', 'résumé']) {
     await clickTab(page, [tabName]);
-    await sleep(1500);
+    await sleep(2000);
   }
-  // Scroll down and back to trigger lazy-loading
+  // Scroll to trigger lazy loading
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await sleep(2000);
   await page.evaluate(() => window.scrollTo(0, 0));
   await sleep(1000);
 
-  // Expand "voir plus" / "voir tout" buttons
-  try {
-    await page.evaluate(() => {
-      document.querySelectorAll('button, a, span').forEach(btn => {
-        const t = btn.textContent.trim().toLowerCase();
-        if (t.includes('voir plus') || t.includes('voir tout') || t.includes('afficher') || t.includes('show more')) btn.click();
-      });
-    });
-    await sleep(2000);
-  } catch (_) {}
+  page.removeListener('response', responseHandler);
+
+  if (isFirst && apiCaptures.length > 0) {
+    console.log(`   📡 ${apiCaptures.length} API response(s) avec données événements:`);
+    for (const c of apiCaptures) {
+      console.log(`      URL: ${c.url}`);
+      console.log(`      Body (200 chars): ${c.body.slice(0, 200)}`);
+    }
+  }
 
   if (isFirst) {
     try {
@@ -495,165 +513,111 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
-  // Step 2: Deep DOM analysis — find events AND minutes (::before, data-*, aria-*, sibling elements)
+  // Deep DOM analysis: get outerHTML of event ancestor to find minute structure
   const { eventBlocks, debugInfo } = await page.evaluate(() => {
     const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|buteur/i;
 
-    // Strategy 1: Look for __NEXT_DATA__ or similar JSON state
-    let jsonData = null;
-    for (const script of document.querySelectorAll('script')) {
-      const t = script.textContent;
-      if (t.includes('__NEXT_DATA__') || t.includes('"events"') || t.includes('"timeline"')) {
-        const sample = t.slice(0, 500);
-        if (/inscrit|averti|remplace/i.test(t)) jsonData = sample;
-      }
-    }
-
-    // Strategy 2: Find leaf elements with event keywords, then look for minutes
-    //  in: (a) ::before/::after, (b) data-* attributes, (c) aria-label, (d) sibling/parent text
-    const eventEls = [];
-    for (const el of document.querySelectorAll('div, span, p, li, td, article, section, strong, em, b')) {
+    // Find event containers and get their ANCESTOR outerHTML
+    const ancestorHTMLs = [];
+    const seenAncestors = new Set();
+    for (const el of document.querySelectorAll('*')) {
       if (el.children.length > 8) continue;
       const t = el.textContent.trim();
-      if (t.length >= 8 && t.length <= 400 && KW.test(t)) {
-        // Get ::before and ::after content
-        let beforeContent = null, afterContent = null;
-        try {
-          const bc = getComputedStyle(el, '::before').content;
-          if (bc && bc !== 'none' && bc !== 'normal' && bc !== '""') beforeContent = bc;
-          const ac = getComputedStyle(el, '::after').content;
-          if (ac && ac !== 'none' && ac !== 'normal' && ac !== '""') afterContent = ac;
-        } catch (_) {}
+      if (t.length < 8 || t.length > 400 || !KW.test(t)) continue;
 
-        // Walk up to 3 parent levels checking ::before and data attrs
-        let parentMinute = null;
-        let ancestor = el;
-        for (let depth = 0; depth < 4; depth++) {
-          ancestor = ancestor.parentElement;
-          if (!ancestor) break;
-          try {
-            const pbc = getComputedStyle(ancestor, '::before').content;
-            if (pbc && pbc !== 'none' && pbc !== 'normal' && pbc !== '""') {
-              const clean = pbc.replace(/['"]/g, '');
-              if (/^\d{1,3}/.test(clean)) parentMinute = clean;
-            }
-          } catch (_) {}
-          // Check data attributes
-          for (const attr of ancestor.attributes || []) {
-            if (/minute|time|chrono/i.test(attr.name) && /\d/.test(attr.value)) {
-              parentMinute = attr.value;
-            }
-          }
-          // Check sibling text elements for just-a-number
-          for (const sib of ancestor.children) {
-            const st = sib.textContent.trim();
-            if (/^\d{1,3}[''′']?\s*$/.test(st)) {
-              parentMinute = st.replace(/[^0-9+]/g, '');
-            }
-          }
-        }
+      // Walk up to find the event row container (stop at 5 levels)
+      let ancestor = el;
+      for (let i = 0; i < 5; i++) {
+        if (!ancestor.parentElement) break;
+        ancestor = ancestor.parentElement;
+        // Stop at a meaningful container (has multiple children, likely the event row)
+        if (ancestor.children.length >= 2 && ancestor.children.length <= 8) break;
+      }
 
-        // Check element's own data attributes
-        let elData = {};
-        for (const attr of el.attributes || []) {
-          if (attr.name.startsWith('data-') || attr.name === 'aria-label') {
-            elData[attr.name] = attr.value;
-          }
-        }
-
-        eventEls.push({
-          text: t.slice(0, 150),
-          tag: el.tagName,
-          cls: (el.className || '').toString().slice(0, 80),
-          before: beforeContent,
-          after: afterContent,
-          parentMinute,
-          data: Object.keys(elData).length > 0 ? elData : null
-        });
+      const key = ancestor.outerHTML.slice(0, 100);
+      if (!seenAncestors.has(key)) {
+        seenAncestors.add(key);
+        ancestorHTMLs.push(ancestor.outerHTML.slice(0, 600));
+        if (ancestorHTMLs.length >= 3) break;
       }
     }
 
-    // Strategy 3: Find ALL small elements with just digits (potential minute indicators)
-    const digitEls = [];
-    for (const el of document.querySelectorAll('span, div, p, td, time, b, strong, em, small')) {
+    // Also: search ALL elements (including custom Angular components) for digit text
+    const allDigitEls = [];
+    for (const el of document.querySelectorAll('*')) {
       const t = el.textContent.trim();
-      if (/^\d{1,3}[''′'+]?\s*$/.test(t) && parseInt(t) >= 1 && parseInt(t) <= 130) {
-        let parentText = '';
-        if (el.parentElement) {
-          parentText = el.parentElement.textContent.trim().slice(0, 100);
+      if (el.children.length === 0 && /^\d{1,3}['′']?\s*$/.test(t)) {
+        const num = parseInt(t);
+        if (num >= 1 && num <= 130) {
+          const parentCls = el.parentElement ? (el.parentElement.className || '').toString().slice(0, 40) : '';
+          const parentTag = el.parentElement ? el.parentElement.tagName : '';
+          allDigitEls.push({
+            text: t, tag: el.tagName, cls: (el.className || '').toString().slice(0, 40),
+            parentTag, parentCls
+          });
         }
-        digitEls.push({ text: t, tag: el.tagName, cls: (el.className || '').toString().slice(0, 50), parentText });
       }
     }
 
-    // Strategy 4: Search innerHTML for minute-like patterns near event keywords
+    // Search innerHTML for "48" (KEBE's minute) in broader context
     const html = document.body.innerHTML;
     const htmlHints = [];
-    // Look for data attributes with minutes
-    const dataMinuteMatch = html.match(/data-\w*(?:minute|time|chrono)\w*="[^"]*"/gi);
-    if (dataMinuteMatch) htmlHints.push(...dataMinuteMatch.slice(0, 5));
-    // Look for "48" near "KEBE" (known event)
-    const kebeIdx = html.indexOf('KEBE');
-    if (kebeIdx > 0) {
-      htmlHints.push('KEBE context: ' + html.slice(Math.max(0, kebeIdx - 200), kebeIdx + 50).replace(/\s+/g, ' ').slice(0, 200));
+    // Find "48" near event-related content
+    const re48 = /[^0-9]48[^0-9]/g;
+    let match;
+    while ((match = re48.exec(html)) !== null) {
+      const context = html.slice(Math.max(0, match.index - 50), match.index + 60).replace(/\s+/g, ' ');
+      if (/event|action|minute|time|chrono|averti|change|content|ng-star/i.test(context)) {
+        htmlHints.push(context);
+      }
+      if (htmlHints.length >= 5) break;
     }
 
-    // Build event blocks from collected data
+    // Build blocks from DOM text (same as before, but deduplicated)
     const blocks = [];
     const seen = new Set();
-    for (const ev of eventEls) {
-      if (seen.has(ev.text)) continue;
-      seen.add(ev.text);
-      let minute = 0;
-      if (ev.parentMinute) {
-        const m = parseInt(ev.parentMinute);
-        if (m >= 1 && m <= 130) minute = m;
+    for (const el of document.querySelectorAll('div, span, p, li, td')) {
+      if (el.children.length > 8) continue;
+      const t = el.textContent.trim();
+      if (t.length >= 8 && t.length <= 400 && KW.test(t) && !seen.has(t)) {
+        seen.add(t);
+        blocks.push({ minute: 0, text: t });
       }
-      if (!minute && ev.before) {
-        const m = parseInt(ev.before.replace(/['"]/g, ''));
-        if (m >= 1 && m <= 130) minute = m;
-      }
-      blocks.push({ minute, text: ev.text });
     }
 
     return {
       eventBlocks: blocks,
       debugInfo: {
-        jsonData,
-        eventElCount: eventEls.length,
-        eventElSample: eventEls.slice(0, 10),
-        digitEls: digitEls.slice(0, 15),
+        ancestorHTMLs,
+        allDigitEls: allDigitEls.slice(0, 20),
         htmlHints
       }
     };
   });
 
   if (isFirst) {
-    if (debugInfo.jsonData) console.log(`   📡 JSON state found: ${debugInfo.jsonData.slice(0, 150)}`);
-    console.log(`   📊 ${debugInfo.eventElCount} éléments DOM avec mots-clés événement`);
-    console.log(`   🔍 Structure des événements DOM:`);
-    for (const ev of debugInfo.eventElSample) {
-      console.log(`      <${ev.tag} class="${ev.cls}">`);
-      console.log(`        text: ${ev.text.slice(0, 80)}`);
-      if (ev.before) console.log(`        ::before = ${ev.before}`);
-      if (ev.after) console.log(`        ::after = ${ev.after}`);
-      if (ev.parentMinute) console.log(`        parentMinute = ${ev.parentMinute}`);
-      if (ev.data) console.log(`        data = ${JSON.stringify(ev.data)}`);
+    console.log(`   🏗️ HTML structure des 3 premiers événements:`);
+    for (const h of debugInfo.ancestorHTMLs) {
+      console.log(`      ${h.replace(/\n/g, ' ').slice(0, 200)}`);
+      console.log('      ---');
     }
-    if (debugInfo.digitEls.length > 0) {
-      console.log(`   🔢 ${debugInfo.digitEls.length} éléments avec chiffres (minutes?):`);
-      for (const d of debugInfo.digitEls) {
-        console.log(`      <${d.tag} class="${d.cls}"> "${d.text}" — parent: ${d.parentText.slice(0, 60)}`);
+    if (debugInfo.allDigitEls.length > 0) {
+      console.log(`   🔢 ${debugInfo.allDigitEls.length} éléments chiffres (tout sélecteur *):`);
+      for (const d of debugInfo.allDigitEls) {
+        console.log(`      <${d.tag} class="${d.cls}"> "${d.text}" — parent: <${d.parentTag} class="${d.parentCls}">`);
       }
     } else {
-      console.log(`   ⚠️ Aucun élément chiffre/minute trouvé dans le DOM`);
+      console.log(`   ⚠️ AUCUN élément digit trouvé dans tout le DOM`);
     }
     if (debugInfo.htmlHints.length > 0) {
-      console.log(`   🔎 HTML hints:`);
-      for (const h of debugInfo.htmlHints) console.log(`      ${h.slice(0, 120)}`);
+      console.log(`   🔎 "48" trouvé dans le HTML près de contenu événement:`);
+      for (const h of debugInfo.htmlHints) console.log(`      ${h.slice(0, 150)}`);
+    } else {
+      console.log(`   ⚠️ "48" non trouvé dans le HTML près de mots-clés événement`);
     }
-    console.log(`   📋 ${eventBlocks.length} blocs d'événements:`);
-    for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 90)}`);
+    console.log(`   📋 ${eventBlocks.length} blocs d'événements (sans minutes):`);
+    for (const b of eventBlocks.slice(0, 5)) console.log(`      📝 ${b.text.slice(0, 90)}`);
+    if (eventBlocks.length > 5) console.log(`      ... et ${eventBlocks.length - 5} de plus`);
   }
 
   // Player name lookup — map surname parts (≥3 chars) to player objects
