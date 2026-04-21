@@ -333,6 +333,20 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       if (m) { scoreHome = m[1]; scoreAway = m[2]; break; }
     }
   }
+  // Strategy 4: scores on separate lines between team names (FFF layout: TEAM \n 0 \n 2 \n TEAM)
+  if (!scoreHome) {
+    for (let i = 1; i < raw.lines.length - 2; i++) {
+      if (/^\d{1,2}$/.test(raw.lines[i]) && /^\d{1,2}$/.test(raw.lines[i + 1])) {
+        const before = raw.lines[i - 1] || '';
+        const after = raw.lines[i + 2] || '';
+        if (before.length >= 3 && after.length >= 3 && !/^\d+$/.test(before) && !/^\d+$/.test(after)) {
+          scoreHome = raw.lines[i];
+          scoreAway = raw.lines[i + 1];
+          break;
+        }
+      }
+    }
+  }
 
   // ─── Find date ───
   let matchDate = '';
@@ -449,15 +463,25 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     redCards: 0
   }));
 
-  // ─── Extract events from RÉSUMÉ tab ───
-  await clickTab(page, ['résumé', 'resume']);
+  // ─── Extract events ───
+  // Step 1: Click each tab to load dynamic content, scroll to trigger lazy-load
+  const tabNames = [‘le match’, ‘résumé’, ‘resume’, ‘composition’, ‘feuille’];
+  for (const tabName of tabNames) {
+    await clickTab(page, [tabName]);
+    await sleep(1500);
+  }
+  // Scroll down and back to trigger lazy-loading
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await sleep(2000);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await sleep(1000);
 
+  // Expand "voir plus" / "voir tout" buttons
   try {
     await page.evaluate(() => {
-      document.querySelectorAll('button, a').forEach(btn => {
+      document.querySelectorAll(‘button, a, span’).forEach(btn => {
         const t = btn.textContent.trim().toLowerCase();
-        if (t.includes('voir plus') || t.includes('voir tout') || t.includes('afficher')) btn.click();
+        if (t.includes(‘voir plus’) || t.includes(‘voir tout’) || t.includes(‘afficher’) || t.includes(‘show more’)) btn.click();
       });
     });
     await sleep(2000);
@@ -465,91 +489,113 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   if (isFirst) {
     try {
-      await page.screenshot({ path: path.join(DEBUG_DIR, 'match-events.png') });
-      fs.writeFileSync(path.join(DEBUG_DIR, 'match-events.html'),
+      await page.screenshot({ path: path.join(DEBUG_DIR, ‘match-events.png’) });
+      fs.writeFileSync(path.join(DEBUG_DIR, ‘match-events.html’),
         await page.evaluate(() => document.body.innerHTML));
     } catch (_) {}
   }
 
-  // Parse events — try multiple strategies since FFF may use various DOM structures
+  // Step 2: Search BOTH innerText AND DOM textContent for event keywords
   const { eventBlocks, debugInfo } = await page.evaluate(() => {
-    const rawLines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
-    const blocks = [];
-
-    // Strategy A: find lines containing event keywords, and look backward for minute
     const KW = /inscrit|averti|exclu|remplace|changement|avertissement|carton|passeur|passe|buteur/i;
-    const MINUTE_RE = /^(\d{1,3})(?:\+(\d{1,2}))?\s*['’′'‛]?\s*$/;  // "90", "90'", "45+2"
+    const MINUTE_RE = /^(\d{1,3})(?:\+(\d{1,2}))?\s*[‘’′’‛ ]?\s*$/;
 
-    // Find event keyword lines and their surrounding context
-    const eventLineIdx = [];
-    for (let i = 0; i < rawLines.length; i++) {
-      if (KW.test(rawLines[i])) eventLineIdx.push(i);
+    // Gather ALL text from page — innerText (visible) + textContent of all leaf-ish nodes (hidden too)
+    const innerLines = (document.body.innerText || ‘’).split(‘\n’).map(l => l.trim()).filter(l => l);
+
+    // Also collect text from DOM nodes (catches hidden/dynamic content)
+    const domTexts = new Set();
+    for (const el of document.querySelectorAll(‘div, span, p, li, td, article, section’)) {
+      if (el.children.length > 8) continue;
+      const t = el.textContent.trim();
+      if (t.length >= 8 && t.length <= 400 && KW.test(t)) domTexts.add(t);
     }
 
-    // For each event, try to find minute within 3 previous lines
+    // Merge: use innerText lines as primary, add unique DOM texts
+    const allTexts = [...innerLines];
+    for (const dt of domTexts) {
+      if (!allTexts.some(l => l.includes(dt) || dt.includes(l))) allTexts.push(dt);
+    }
+
+    // Find lines with event keywords
+    const eventLineIdx = [];
+    for (let i = 0; i < allTexts.length; i++) {
+      if (KW.test(allTexts[i])) eventLineIdx.push(i);
+    }
+
+    // Build event blocks: for each event line, look backward for minute
+    const blocks = [];
     const used = new Set();
     for (const idx of eventLineIdx) {
       if (used.has(idx)) continue;
 
-      // Look for minute in previous 3 lines
       let minute = 0;
       let minuteIdx = -1;
+
+      // Look for minute in previous 3 lines
       for (let j = Math.max(0, idx - 3); j < idx; j++) {
-        const mm = rawLines[j].match(MINUTE_RE);
+        const mm = allTexts[j].match(MINUTE_RE);
         if (mm) {
           const m = parseInt(mm[1]) + (mm[2] ? parseInt(mm[2]) : 0);
           if (m >= 1 && m <= 130) { minute = m; minuteIdx = j; }
         }
       }
 
-      // Also check if minute is concatenated at start of the event line: "90' Changement pour..."
+      // Also check concatenated: "90’ Changement..." or "48Avertissement..."
       if (!minute) {
-        const mm2 = rawLines[idx].match(/^(\d{1,3})(?:\+(\d{1,2}))?\s*['’′'‛]\s*(.+)/);
+        const mm2 = allTexts[idx].match(/^(\d{1,3})(?:\+(\d{1,2}))?\s*[‘’′’‛]?\s*[A-ZÀ-Ÿa-z]/);
         if (mm2) {
           const m = parseInt(mm2[1]) + (mm2[2] ? parseInt(mm2[2]) : 0);
           if (m >= 1 && m <= 130) minute = m;
         }
       }
 
-      // Collect event text: from minute line (if any) through 4 lines after event line
+      // Collect text
       const startIdx = minuteIdx >= 0 ? minuteIdx : idx;
-      const endIdx = Math.min(rawLines.length, idx + 4);
+      const endIdx = Math.min(allTexts.length, idx + 5);
       const parts = [];
       for (let k = startIdx; k < endIdx; k++) {
         if (used.has(k)) continue;
-        if (k !== startIdx && MINUTE_RE.test(rawLines[k])) break;  // next event
-        if (rawLines[k].length > 100) break;
-        parts.push(rawLines[k]);
+        if (k !== startIdx && MINUTE_RE.test(allTexts[k])) break;
+        if (allTexts[k].length > 300) break;
+        parts.push(allTexts[k]);
         used.add(k);
       }
 
       if (parts.length > 0) {
-        blocks.push({ minute, text: parts.join(' ').trim() });
+        blocks.push({ minute, text: parts.join(‘ ‘).trim() });
       }
     }
 
-    // Debug: sample of lines around first event
-    const firstEventIdx = eventLineIdx[0] || 0;
-    const contextStart = Math.max(0, firstEventIdx - 5);
-    const contextEnd = Math.min(rawLines.length, firstEventIdx + 25);
-    const sampleContext = rawLines.slice(contextStart, contextEnd);
+    // Debug context
+    const sampleLines = allTexts.slice(0, 60);
+    const domEventSample = [...domTexts].slice(0, 20);
 
     return {
       eventBlocks: blocks,
       debugInfo: {
-        totalLines: rawLines.length,
+        innerLineCount: innerLines.length,
+        domTextCount: domTexts.size,
+        totalTexts: allTexts.length,
         eventLines: eventLineIdx.length,
-        sampleContext
+        sampleLines,
+        domEventSample
       }
     };
   });
 
   if (isFirst) {
-    console.log(`   📊 ${debugInfo.totalLines} lignes, ${debugInfo.eventLines} avec mots-clés événements`);
-    console.log(`   🔍 Contexte autour du 1er événement:`);
-    for (const l of debugInfo.sampleContext) console.log(`      | ${l.slice(0, 90)}`);
-    console.log(`   📋 ${eventBlocks.length} blocs d'événements extraits:`);
-    for (const b of eventBlocks) console.log(`      📝 ${b.minute}' ${b.text.slice(0, 90)}`);
+    console.log(`   📊 innerText: ${debugInfo.innerLineCount} lignes | DOM texts: ${debugInfo.domTextCount} | Events: ${debugInfo.eventLines}`);
+    if (debugInfo.domEventSample.length > 0) {
+      console.log(`   🔍 DOM events trouvés:`);
+      for (const t of debugInfo.domEventSample) console.log(`      📝 ${t.slice(0, 100)}`);
+    }
+    if (debugInfo.eventLines === 0) {
+      console.log(`   ⚠️ Aucun événement trouvé ! Lignes de la page:`);
+      for (const l of debugInfo.sampleLines) console.log(`      | ${l.slice(0, 90)}`);
+    }
+    console.log(`   📋 ${eventBlocks.length} blocs d’événements:`);
+    for (const b of eventBlocks) console.log(`      📝 ${b.minute}’ ${b.text.slice(0, 90)}`);
   }
 
   // Player name lookup — map surname parts (≥3 chars) to player objects
