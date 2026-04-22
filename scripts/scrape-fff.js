@@ -390,6 +390,10 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
+  // Click on "Feuille de match" or "Composition" tab to load all players
+  await clickTab(page, ['feuille', 'composition', 'compo']);
+  await sleep(2000);
+
   // ─── Extract all structured data from the page ───
   const raw = await page.evaluate(() => {
     const text = document.body.innerText || '';
@@ -640,19 +644,41 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       break;
     }
   }
+  // Fallback: look for number sequence reset (e.g., numbers go high then back to 1-5)
+  if (splitIdx < 0 && allPlayers.length >= 20) {
+    for (let i = 12; i < allPlayers.length; i++) {
+      const num = parseInt(allPlayers[i].number);
+      const prevNum = parseInt(allPlayers[i - 1].number);
+      if (num <= 5 && prevNum >= 12) {
+        splitIdx = i;
+        break;
+      }
+    }
+  }
 
   let homePlayers, awayPlayers;
   if (splitIdx > 0) {
     homePlayers = allPlayers.slice(0, splitIdx);
     awayPlayers = allPlayers.slice(splitIdx);
-  } else {
+  } else if (allPlayers.length >= 20) {
     // Fallback: split in half
     const half = Math.ceil(allPlayers.length / 2);
     homePlayers = allPlayers.slice(0, half);
     awayPlayers = allPlayers.slice(half);
+  } else {
+    // Very few players found — likely only one team's table loaded.
+    // Try to determine which team by checking names against team keywords.
+    const hasOrleans = allPlayers.some(p => matchesTeam(p.name));
+    if (hasOrleans || isHome) {
+      homePlayers = allPlayers;
+      awayPlayers = [];
+    } else {
+      homePlayers = [];
+      awayPlayers = allPlayers;
+    }
   }
 
-  if (isFirst) console.log(`   🔎 Split: ${homePlayers.length} home, ${awayPlayers.length} away`);
+  console.log(`   🔎 Split: ${homePlayers.length} home, ${awayPlayers.length} away (total: ${allPlayers.length})`);
 
   // Pick Orléans side
   const ourPlayers = isHome ? homePlayers : awayPlayers;
@@ -669,6 +695,10 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     yellowCards: 0,
     redCards: 0
   }));
+
+  // Go back to Résumé tab for events
+  await clickTab(page, ['résumé', 'resume', 'résume']);
+  await sleep(2000);
 
   // ─── Extract events from Angular <app-moment-fort> components ───
   // The FFF page is an Angular app. Events are inside <app-moment-fort> elements:

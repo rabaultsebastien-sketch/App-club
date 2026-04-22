@@ -1771,12 +1771,19 @@ function openFlashscorePreview(matches) {
       if (!m) return;
 
       for (const fp of m.players) {
+        // Name aliases: FFF name → squad last name
+        const NAME_ALIASES = {
+          'MAMADOU DIABY': 'SYLLA',
+        };
+        const aliasedName = NAME_ALIASES[fp.name.toUpperCase()] || null;
+
         const nameParts = (fp.name || '').trim().split(/\s+/);
         const lastName = nameParts.filter(w => w === w.toUpperCase() && w.length > 1).join(' ') || nameParts.slice(-1).join('');
         const firstName = nameParts.filter(w => w !== w.toUpperCase() || w.length <= 1).join(' ') || nameParts.slice(0, -1).join(' ');
 
         let squadP = state.squad.find(p =>
           p.lastName.toUpperCase() === lastName.toUpperCase() ||
+          (aliasedName && p.lastName.toUpperCase() === aliasedName.toUpperCase()) ||
           (p.number && p.number === fp.number)
         );
 
@@ -1784,7 +1791,8 @@ function openFlashscorePreview(matches) {
           squadP = state.squad.find(p => {
             const fullSq = (p.firstName + ' ' + p.lastName).toLowerCase();
             const fullFs = fp.name.toLowerCase();
-            return fullSq.includes(fullFs) || fullFs.includes(p.lastName.toLowerCase());
+            return fullSq.includes(fullFs) || fullFs.includes(p.lastName.toLowerCase())
+              || (aliasedName && fullSq.includes(aliasedName.toLowerCase()));
           });
         }
 
