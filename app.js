@@ -1796,8 +1796,11 @@ function openFlashscorePreview(matches) {
         let squadP = state.squad.find(p =>
           p.lastName.toUpperCase() === lastName.toUpperCase() ||
           (aliasedName && p.lastName.toUpperCase() === aliasedName.toUpperCase()) ||
-          (p.number && p.number === fp.number)
+          (p.number && String(p.number) === String(fp.number))
         );
+        if (fp.name.toLowerCase().includes('diaby')) {
+          console.log(`[DEBUG DIABY] round=${m.round} name="${fp.name}" alias=${aliasedName} lastName="${lastName}" matched=${squadP ? squadP.lastName : 'null'}`);
+        }
 
         if (!squadP) {
           squadP = state.squad.find(p => {

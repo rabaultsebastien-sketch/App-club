@@ -703,6 +703,10 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     redCards: 0
   }));
 
+  // Debug: check for DIABY in player list
+  const diabyCheck = players.find(p => normName(p.name).includes('diaby'));
+  console.log(`   👤 DIABY: ${diabyCheck ? `"${diabyCheck.name}" #${diabyCheck.number} ${diabyCheck.starter ? 'titu' : 'rempl'}` : 'NON TROUVÉ'}`);
+
   // ─── Extract events from Angular <app-moment-fort> components ───
   // The FFF page is an Angular app. Events are inside <app-moment-fort> elements:
   //   <app-moment-fort class="match ng-star-inserted">
