@@ -1726,6 +1726,7 @@ function openFlashscorePreview(matches) {
     return {
       idx, date: m.date || '', opponent, venue,
       round: m.round || '',
+      matchId: m.matchId || '',
       title,
       score: `${m.scoreHome || '?'} - ${m.scoreAway || '?'}`,
       scoreHome: String(isHome ? m.scoreHome : m.scoreAway) || '',
@@ -1799,6 +1800,7 @@ function openFlashscorePreview(matches) {
         if (!squadP) continue;
 
         const alreadyIdx = (squadP.matches || []).findIndex(em => {
+          if (m.matchId && em.matchId && em.matchId === m.matchId) return true;
           if (em.round && m.round && em.round === m.round && em.opponent === m.opponent) return true;
           if (em.date && m.date && em.date === m.date && em.opponent === m.opponent) return true;
           return false;
@@ -1808,6 +1810,7 @@ function openFlashscorePreview(matches) {
 
         const matchData = {
           id: alreadyIdx >= 0 ? squadP.matches[alreadyIdx].id : uid(),
+          matchId: m.matchId || '',
           date: m.date,
           opponent: m.opponent,
           venue: m.venue,

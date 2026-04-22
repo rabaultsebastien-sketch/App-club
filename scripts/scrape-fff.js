@@ -390,10 +390,6 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     } catch (_) {}
   }
 
-  // Click on "Feuille de match" or "Composition" tab to load all players
-  await clickTab(page, ['feuille', 'composition', 'compo']);
-  await sleep(2000);
-
   // ─── Extract all structured data from the page ───
   const raw = await page.evaluate(() => {
     const text = document.body.innerText || '';
@@ -660,6 +656,13 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   if (splitIdx > 0) {
     homePlayers = allPlayers.slice(0, splitIdx);
     awayPlayers = allPlayers.slice(splitIdx);
+    // Sanity check: if split is too lopsided (one side < 10), fall back to midpoint
+    if (allPlayers.length >= 20 && (homePlayers.length < 10 || awayPlayers.length < 10)) {
+      console.log(`   ⚠️ Split déséquilibré (${homePlayers.length}+${awayPlayers.length}), utilisation du milieu`);
+      splitIdx = Math.ceil(allPlayers.length / 2);
+      homePlayers = allPlayers.slice(0, splitIdx);
+      awayPlayers = allPlayers.slice(splitIdx);
+    }
   } else if (allPlayers.length >= 20) {
     // Fallback: split in half
     const half = Math.ceil(allPlayers.length / 2);
@@ -695,10 +698,6 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     yellowCards: 0,
     redCards: 0
   }));
-
-  // Go back to Résumé tab for events
-  await clickTab(page, ['résumé', 'resume', 'résume']);
-  await sleep(2000);
 
   // ─── Extract events from Angular <app-moment-fort> components ───
   // The FFF page is an Angular app. Events are inside <app-moment-fort> elements:
@@ -807,13 +806,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     return best;
   }
 
-  // Filter to our team's events only (skip opponent events)
-  // Keep events that: a) are on our side or neutral, OR b) mention one of our players
+  // Filter to our team's events only (strict: skip all opponent-side events)
   const opposingSide = ourSide === 'home' ? 'away' : 'home';
-  const ourEvents = eventBlocks.filter(b => {
-    if (b.side !== opposingSide) return true;
-    return findPlayerInText(b.text) !== null;
-  });
+  const ourEvents = eventBlocks.filter(b => b.side !== opposingSide);
 
   if (isFirst) {
     console.log(`   🎯 ${ourEvents.length} événements Orléans (sur ${eventBlocks.length} total)`);
