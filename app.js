@@ -1776,7 +1776,18 @@ function openFlashscorePreview(matches) {
         const NAME_ALIASES = {
           'MAMADOU DIABY': 'SYLLA',
         };
-        const aliasedName = NAME_ALIASES[fp.name.toUpperCase()] || null;
+        let aliasedName = NAME_ALIASES[fp.name.toUpperCase()] || null;
+        if (!aliasedName) {
+          const nameUp = fp.name.toUpperCase().trim();
+          const nameParts = nameUp.split(/\s+/);
+          for (const [key, val] of Object.entries(NAME_ALIASES)) {
+            const keyParts = key.split(/\s+/);
+            if (keyParts.some(kp => nameParts.includes(kp))) {
+              aliasedName = val;
+              break;
+            }
+          }
+        }
 
         const nameParts = (fp.name || '').trim().split(/\s+/);
         const lastName = nameParts.filter(w => w === w.toUpperCase() && w.length > 1).join(' ') || nameParts.slice(-1).join('');

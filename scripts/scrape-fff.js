@@ -197,7 +197,11 @@ function matchesTeam(text) {
           if (detail && detail.players.length > 0) {
             const roundMatch = detail.round.match(/(\d+)/);
             const detectedJ = roundMatch ? parseInt(roundMatch[1]) : 0;
-            if (detectedJ > 0 && !JOURNEES.includes(detectedJ)) {
+            if (detectedJ === 0) {
+              console.log(`   ⏭️ Pas de journée détectée — match de coupe, on passe`);
+              continue;
+            }
+            if (!JOURNEES.includes(detectedJ)) {
               console.log(`   ⏭️ Journée ${detectedJ} — exclue, on passe`);
               continue;
             }
@@ -656,8 +660,8 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   if (splitIdx > 0) {
     homePlayers = allPlayers.slice(0, splitIdx);
     awayPlayers = allPlayers.slice(splitIdx);
-    // Sanity check: if split is too lopsided (one side < 10), fall back to midpoint
-    if (allPlayers.length >= 20 && (homePlayers.length < 10 || awayPlayers.length < 10)) {
+    // Sanity check: if split is too lopsided (diff > 4), fall back to midpoint
+    if (allPlayers.length >= 20 && Math.abs(homePlayers.length - awayPlayers.length) > 4) {
       console.log(`   ⚠️ Split déséquilibré (${homePlayers.length}+${awayPlayers.length}), utilisation du milieu`);
       splitIdx = Math.ceil(allPlayers.length / 2);
       homePlayers = allPlayers.slice(0, splitIdx);
