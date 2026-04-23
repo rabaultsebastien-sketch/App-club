@@ -31,6 +31,11 @@ const JOURNEES = [1,2,3,4,5,6,7,8,9,10,11,13,14,15,16,17,18,19,20,21,22,23,24,25
 const URL_IDX = process.argv.indexOf('--url');
 const SINGLE_URL = URL_IDX !== -1 ? process.argv[URL_IDX + 1] : null;
 
+// FFF name → squad name (applied before writing JSON)
+const NAME_MAP = {
+  'MAMADOU DIABY': 'MAMADOU SYLLA',
+};
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function normName(name) {
@@ -698,7 +703,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   // Mark starters (first 11) vs subs
   const players = ourPlayers.map((p, i) => ({
-    name: p.name,
+    name: NAME_MAP[p.name.toUpperCase()] || p.name,
     number: p.number,
     team: ourSide,
     starter: i < 11,

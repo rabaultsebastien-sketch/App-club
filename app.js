@@ -1772,17 +1772,16 @@ function openFlashscorePreview(matches) {
       if (!m) return;
 
       for (const fp of m.players) {
-        // Name aliases: FFF name → squad last name
+        // Name aliases: FFF name → squad name parts to match
         const NAME_ALIASES = {
           'MAMADOU DIABY': 'SYLLA',
+          'MAMADOU SYLLA': 'SYLLA',
         };
         let aliasedName = NAME_ALIASES[fp.name.toUpperCase()] || null;
         if (!aliasedName) {
           const nameUp = fp.name.toUpperCase().trim();
-          const nameParts = nameUp.split(/\s+/);
           for (const [key, val] of Object.entries(NAME_ALIASES)) {
-            const keyParts = key.split(/\s+/);
-            if (keyParts.some(kp => nameParts.includes(kp))) {
+            if (nameUp.includes(key) || key.includes(nameUp)) {
               aliasedName = val;
               break;
             }
@@ -1795,11 +1794,11 @@ function openFlashscorePreview(matches) {
 
         let squadP = state.squad.find(p =>
           p.lastName.toUpperCase() === lastName.toUpperCase() ||
-          (aliasedName && p.lastName.toUpperCase() === aliasedName.toUpperCase()) ||
+          (aliasedName && p.lastName.toUpperCase().includes(aliasedName.toUpperCase())) ||
           (p.number && String(p.number) === String(fp.number))
         );
-        if (fp.name.toLowerCase().includes('diaby')) {
-          console.log(`[DEBUG DIABY] round=${m.round} name="${fp.name}" alias=${aliasedName} lastName="${lastName}" matched=${squadP ? squadP.lastName : 'null'}`);
+        if (fp.name.toLowerCase().includes('diaby') || fp.name.toLowerCase().includes('sylla')) {
+          console.log(`[DEBUG SYLLA] round=${m.round} name="${fp.name}" alias=${aliasedName} lastName="${lastName}" matched=${squadP ? squadP.lastName : 'null'}`);
         }
 
         if (!squadP) {
