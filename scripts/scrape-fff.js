@@ -138,13 +138,48 @@ function matchesTeam(text) {
         console.log('📸 Debug: saison-page.png + .html sauvegardés');
       } catch (_) {}
 
-      // Dump first lines for debug
-      const pageLines = await page.evaluate(() => {
-        return document.body.innerText.split('\n').map(l => l.trim()).filter(l => l).slice(0, 80);
+      // Extract ALL page lines (not just 80) for score parsing
+      const allPageLines = await page.evaluate(() => {
+        return document.body.innerText.split('\n').map(l => l.trim()).filter(l => l);
       });
-      console.log(`\n📝 Contenu de la page (${pageLines.length} lignes):`);
-      for (const line of pageLines.slice(0, 50)) {
+      console.log(`\n📝 Contenu de la page (${allPageLines.length} lignes):`);
+      for (const line of allPageLines.slice(0, 60)) {
         console.log(`   | ${line.slice(0, 120)}`);
+      }
+
+      // Parse saison page text to build journée → score map
+      const saisonScores = {};
+      let currentJ = 0;
+      for (let i = 0; i < allPageLines.length; i++) {
+        const jm = allPageLines[i].match(/journ[eé]e\s+(\d+)/i);
+        if (jm) {
+          currentJ = parseInt(jm[1]);
+          continue;
+        }
+        if (currentJ > 0) {
+          // Pattern 1: "X - Y" on a single line (standalone score)
+          const sm = allPageLines[i].match(/^(\d{1,2})\s*[-–−—]\s*(\d{1,2})$/);
+          if (sm) {
+            saisonScores[currentJ] = `${sm[1]}-${sm[2]}`;
+            currentJ = 0;
+            continue;
+          }
+          // Pattern 2: single digit then team name then single digit (FFF layout)
+          if (/^\d{1,2}$/.test(allPageLines[i])) {
+            // Look ahead: next non-digit line, then another digit
+            for (let j = i + 1; j < Math.min(i + 4, allPageLines.length); j++) {
+              if (/^\d{1,2}$/.test(allPageLines[j]) && j > i + 0) {
+                saisonScores[currentJ] = `${allPageLines[i]}-${allPageLines[j]}`;
+                currentJ = 0;
+                break;
+              }
+            }
+          }
+        }
+      }
+      console.log(`\n📊 Scores page saison: ${Object.keys(saisonScores).length} trouvés`);
+      for (const [j, s] of Object.entries(saisonScores).sort((a,b) => a[0]-b[0])) {
+        console.log(`   J${j}: ${s}`);
       }
 
       // Collect ALL match links using SPATIAL journée detection
@@ -272,11 +307,13 @@ function matchesTeam(text) {
       const allResults = [];
       for (let i = 0; i < toScrape.length; i++) {
         const { url, journee, saisonScore } = toScrape[i];
+        // Combine per-link score with saison page parsed score
+        const fallbackScore = saisonScore || saisonScores[journee] || '';
         const slug = url.split('/').pop().slice(0, 70);
         console.log(`\n🔍 [${i + 1}/${toScrape.length}] J${journee || '?'} ${slug}...`);
 
         try {
-          const detail = await scrapeMatchDetail(page, url, i === 0, saisonScore);
+          const detail = await scrapeMatchDetail(page, url, i === 0, fallbackScore);
           if (detail && detail.players.length > 0) {
             // Use saison page journée as fallback
             if (!detail.round && journee > 0) {
@@ -523,22 +560,78 @@ async function scrapeMatchDetail(page, matchUrl, isFirst, saisonScore) {
     // Also find team names from page title or main heading
     const titleMatch = document.title.match(/(.+?)\s*[-–vs]\s*(.+?)(?:\s*\||\s*$)/);
 
-    // Try to find score from DOM elements (handle multiple dash types: - – − —)
-    const DASH_RE = /[-–−—]/;
+    // Try to find score from DOM — multiple strategies
     const SCORE_RE = /^\d{1,2}\s*[-–−—]\s*\d{1,2}$/;
-    const SCORE_EXTRACT = /(\d{1,2})\s*[-–−—]\s*(\d{1,2})/;
     let domScore = '';
-    for (const sel of ['[class*="score"]', '[class*="Score"]', '[class*="result"]', '[data-testid*="score"]']) {
+
+    // Strategy A: Look for combined "X - Y" in score-related elements
+    const scoreSelectors = [
+      '[class*="score"]', '[class*="Score"]', '[class*="result"]', '[class*="Result"]',
+      '[class*="marque"]', '[class*="Marque"]', '[class*="note"]',
+      'app-score', 'app-match-header', 'app-match-score', 'app-resultat',
+      '[data-testid*="score"]'
+    ];
+    for (const sel of scoreSelectors) {
       for (const el of document.querySelectorAll(sel)) {
         const t = el.textContent.trim();
         if (SCORE_RE.test(t)) { domScore = t; break; }
       }
       if (domScore) break;
     }
-    // Also try page title: Angular often puts "TEAM 2-1 TEAM | FFF"
+
+    // Strategy B: Find individual score digits inside score containers
+    if (!domScore) {
+      for (const sel of scoreSelectors) {
+        for (const container of document.querySelectorAll(sel)) {
+          const digits = [];
+          const walk = (el) => {
+            if (el.children.length === 0) {
+              const t = el.textContent.trim();
+              if (/^\d{1,2}$/.test(t)) digits.push(t);
+            } else {
+              for (const child of el.children) walk(child);
+            }
+          };
+          walk(container);
+          if (digits.length >= 2) {
+            domScore = `${digits[0]} - ${digits[1]}`;
+            break;
+          }
+        }
+        if (domScore) break;
+      }
+    }
+
+    // Strategy C: Page title often has "TEAM 2-1 TEAM | FFF"
     if (!domScore) {
       const titleScore = document.title.match(/(\d{1,2})\s*[-–−—]\s*(\d{1,2})/);
       if (titleScore) domScore = `${titleScore[1]} - ${titleScore[2]}`;
+    }
+
+    // Strategy D: Find any element whose ONLY text content is a score pattern
+    if (!domScore) {
+      for (const el of document.querySelectorAll('span, div, p, td, h1, h2, h3, h4')) {
+        if (el.children.length > 2) continue;
+        const t = el.textContent.trim();
+        if (SCORE_RE.test(t)) {
+          domScore = t;
+          break;
+        }
+      }
+    }
+
+    // Debug: dump all score-like elements for first match
+    const scoreDebug = [];
+    for (const el of document.querySelectorAll('*')) {
+      if (el.children.length > 3) continue;
+      const t = el.textContent.trim();
+      if (t.length <= 5 && /\d/.test(t) && el.children.length === 0) {
+        const cls = el.className || '';
+        const tag = el.tagName;
+        if (cls.toLowerCase().includes('score') || cls.toLowerCase().includes('result') || cls.toLowerCase().includes('marque')) {
+          scoreDebug.push(`${tag}.${cls.slice(0,30)}="${t}"`);
+        }
+      }
     }
 
     // Try to find date from DOM elements (Angular pages often put it in specific elements)
@@ -556,7 +649,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst, saisonScore) {
       if (dm) domDate = dm[0];
     }
 
-    return { lines: lines.slice(0, 400), tableRows: tableRows.slice(0, 80), teamNames, title: document.title, domScore, domDate };
+    return { lines: lines.slice(0, 400), tableRows: tableRows.slice(0, 80), teamNames, title: document.title, domScore, domDate, scoreDebug };
   });
 
   // ─── Parse team names ───
@@ -646,22 +739,42 @@ async function scrapeMatchDetail(page, matchUrl, isFirst, saisonScore) {
       }
     }
   }
-  // Strategy 5: retry after longer wait
+  // Strategy 5: retry after longer wait with full DOM scan
   if (!scoreHome) {
     await sleep(5000);
-    const retryRaw = await page.evaluate(() => {
+    const retryResult = await page.evaluate(() => {
       let domScore = '';
-      for (const sel of ['[class*="score"]', '[class*="Score"]', '[class*="result"]', '[class*="Result"]']) {
+      // 5a: score class elements
+      const sels = ['[class*="score"]', '[class*="Score"]', '[class*="result"]', '[class*="Result"]',
+        '[class*="marque"]', 'app-score', 'app-match-header'];
+      for (const sel of sels) {
         for (const el of document.querySelectorAll(sel)) {
           const t = el.textContent.trim();
           if (/^\d{1,2}\s*[-–−—]\s*\d{1,2}$/.test(t)) { domScore = t; break; }
         }
         if (domScore) break;
       }
+      // 5b: individual digits in score containers
+      if (!domScore) {
+        for (const sel of sels) {
+          for (const container of document.querySelectorAll(sel)) {
+            const digits = [];
+            for (const el of container.querySelectorAll('*')) {
+              if (el.children.length > 0) continue;
+              const t = el.textContent.trim();
+              if (/^\d{1,2}$/.test(t)) digits.push(t);
+            }
+            if (digits.length >= 2) { domScore = `${digits[0]} - ${digits[1]}`; break; }
+          }
+          if (domScore) break;
+        }
+      }
+      // 5c: title
       if (!domScore) {
         const titleM = document.title.match(/(\d{1,2})\s*[-–−—]\s*(\d{1,2})/);
         if (titleM) domScore = `${titleM[1]} - ${titleM[2]}`;
       }
+      // 5d: text lines
       if (!domScore) {
         const lines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
         for (const line of lines) {
@@ -680,14 +793,24 @@ async function scrapeMatchDetail(page, matchUrl, isFirst, saisonScore) {
           }
         }
       }
-      return domScore;
+      // Debug: dump elements matching score-related classes
+      const debug = [];
+      for (const sel of sels) {
+        for (const el of document.querySelectorAll(sel)) {
+          debug.push(`${sel} → "${el.textContent.trim().slice(0, 50)}"`);
+        }
+      }
+      return { domScore, debug };
     });
-    if (retryRaw) {
-      const m = retryRaw.match(scoreRe);
+    if (retryResult.domScore) {
+      const m = retryResult.domScore.match(scoreRe);
       if (m) {
         scoreHome = m[1]; scoreAway = m[2];
         console.log(`   🔄 Score trouvé au retry: ${scoreHome}-${scoreAway}`);
       }
+    }
+    if (!scoreHome && retryResult.debug.length > 0) {
+      console.log(`   🔍 Éléments score trouvés: ${retryResult.debug.join(' | ')}`);
     }
   }
   // Strategy 6: use saison page score as last resort
@@ -763,7 +886,19 @@ async function scrapeMatchDetail(page, matchUrl, isFirst, saisonScore) {
   const ourSide = isHome ? 'home' : 'away';
   const opponent = isHome ? awayTeam : homeTeam;
 
-  console.log(`   📋 ${homeTeam} ${scoreHome}-${scoreAway} ${awayTeam} (${round}) — Orléans ${isHome ? 'Domicile' : 'Extérieur'}`);
+  console.log(`   📋 ${homeTeam} ${scoreHome || '?'}-${scoreAway || '?'} ${awayTeam} (${round}) — Orléans ${isHome ? 'Domicile' : 'Extérieur'}`);
+  if (!scoreHome) {
+    console.log(`   ⚠️ Score non trouvé! domScore="${raw.domScore}" title="${raw.title.slice(0, 60)}" saisonScore="${saisonScore || ''}"`);
+    if (raw.scoreDebug && raw.scoreDebug.length > 0) {
+      console.log(`   🔍 Score debug: ${raw.scoreDebug.join(', ')}`);
+    }
+    // Dump lines containing only digits (potential scores)
+    const digitLines = raw.lines.filter(l => /^\d{1,2}$/.test(l)).slice(0, 10);
+    if (digitLines.length > 0) console.log(`   🔢 Lignes chiffres: ${digitLines.join(', ')}`);
+    // Dump first 15 lines for context
+    console.log(`   📝 15 premières lignes:`);
+    for (const c of raw.lines.slice(0, 15)) console.log(`      | ${c.slice(0, 80)}`);
+  }
 
   // ─── Extract players from tables ───
   // FFF feuille de match: tables with rows [number, name, ...]
