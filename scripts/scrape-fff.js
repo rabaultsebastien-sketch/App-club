@@ -702,9 +702,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   // Pick Orléans side
   const ourPlayers = isHome ? homePlayers : awayPlayers;
 
-  // Mark starters (first 11) vs subs
+  // Mark starters (first 11) vs subs — keep ORIGINAL FFF names for event matching
   const players = ourPlayers.map((p, i) => ({
-    name: NAME_MAP[p.name.toUpperCase()] || p.name,
+    name: p.name,
     number: p.number,
     team: ourSide,
     starter: i < 11,
@@ -793,34 +793,28 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     for (const b of eventBlocks) console.log(`      ${b.minute}' [${b.side}] ${b.text.slice(0, 80)}`);
   }
 
-  // Player name lookup — map surname parts (≥3 chars) to player objects
-  const playersByName = {};
-  for (const p of players) {
-    for (const part of normName(p.name).split(/\s+/)) {
-      if (part.length >= 3) {
-        if (!playersByName[part] || part.length > playersByName[part]._keyLen) {
-          playersByName[part] = p;
-          p._keyLen = part.length;
-        }
-      }
-    }
-  }
-
+  // Player name lookup — count matching name parts per player for accuracy
   function findPlayerInText(text) {
     if (!text) return null;
     const n = normName(text);
-    let best = null, bestLen = 0;
-    for (const [key, player] of Object.entries(playersByName)) {
-      if (key.length < 3) continue;
-      const idx = n.indexOf(key);
-      if (idx < 0) continue;
-      // Word boundary: char before and after must be non-letter (or start/end)
-      const before = idx > 0 ? n[idx - 1] : ' ';
-      const after = idx + key.length < n.length ? n[idx + key.length] : ' ';
-      if (/[a-z]/.test(before) || /[a-z]/.test(after)) continue;
-      if (key.length > bestLen) {
-        best = player;
-        bestLen = key.length;
+    let best = null, bestScore = 0;
+    for (const p of players) {
+      const parts = normName(p.name).split(/\s+/).filter(w => w.length >= 3);
+      let matchCount = 0, matchLen = 0;
+      for (const part of parts) {
+        const idx = n.indexOf(part);
+        if (idx < 0) continue;
+        const before = idx > 0 ? n[idx - 1] : ' ';
+        const after = idx + part.length < n.length ? n[idx + part.length] : ' ';
+        if (/[a-z]/.test(before) || /[a-z]/.test(after)) continue;
+        matchCount++;
+        matchLen += part.length;
+      }
+      if (matchCount === 0) continue;
+      const score = matchCount * 100 + matchLen;
+      if (score > bestScore) {
+        best = p;
+        bestScore = score;
       }
     }
     return best;
@@ -893,8 +887,12 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     console.log(`   ✅ ${appliedEvents.length} événements appliqués:`);
     for (const e of appliedEvents) console.log(`      ${e}`);
   }
-  // Cleanup temp property
-  for (const p of players) delete p._keyLen;
+  // Apply name mapping AFTER event processing (events use FFF names)
+  for (const p of players) {
+    const mapped = NAME_MAP[p.name.toUpperCase()];
+    if (mapped) p.name = mapped;
+    delete p._keyLen;
+  }
 
   if (players.length === 0) return null;
 
