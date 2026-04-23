@@ -464,7 +464,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   const isEventText = (s) => /changement|avertissement|but\s+pour|inscrit|averti|exclu|remplace|passeur|carton|voir plus|journée|\d+'|résumé|vidéo|statistique|composition|feuille/i.test(s);
 
   let homeTeam = '', awayTeam = '';
-  const urlSlug = matchUrl.split('/').slice(-2, -1)[0] || matchUrl.split('/').pop() || '';
+  const urlSlug = matchUrl.split('/').filter(Boolean).pop() || '';
 
   // Strategy 1: team name elements — skip event text, navigation, and section headers
   for (const tn of raw.teamNames) {
