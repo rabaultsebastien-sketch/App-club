@@ -32,8 +32,9 @@ const URL_IDX = process.argv.indexOf('--url');
 const SINGLE_URL = URL_IDX !== -1 ? process.argv[URL_IDX + 1] : null;
 
 // FFF name → squad name (applied before writing JSON)
+// Use mixed case: lowercase firstName so import extracts correct lastName
 const NAME_MAP = {
-  'MAMADOU DIABY': 'MAMADOU SYLLA',
+  'MAMADOU DIABY': 'Mamadou SYLLA DIABY',
 };
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -714,9 +715,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     redCards: 0
   }));
 
-  // Debug: check for DIABY in player list
-  const diabyCheck = players.find(p => normName(p.name).includes('diaby'));
-  console.log(`   👤 DIABY: ${diabyCheck ? `"${diabyCheck.name}" #${diabyCheck.number} ${diabyCheck.starter ? 'titu' : 'rempl'}` : 'NON TROUVÉ'}`);
+  // Debug: check for DIABY/SYLLA in player list
+  const syllaCheck = players.find(p => normName(p.name).includes('diaby') || normName(p.name).includes('sylla'));
+  console.log(`   👤 SYLLA: ${syllaCheck ? `"${syllaCheck.name}" #${syllaCheck.number} ${syllaCheck.starter ? 'titu' : 'rempl'}` : 'NON TROUVÉ'}`);
 
   // ─── Extract events from Angular <app-moment-fort> components ───
   // The FFF page is an Angular app. Events are inside <app-moment-fort> elements:

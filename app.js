@@ -1748,7 +1748,7 @@ function openFlashscorePreview(matches) {
   `).join('');
 
   openModal(`
-    <h3>\u26A1 Import FFF</h3>
+    <h3>\u26A1 Import FFF v3</h3>
     <div class="card-sub">${matches.length} match(s) trouv\u00e9(s). Cochez ceux \u00e0 importer.</div>
     <div style="max-height:50vh; overflow:auto; margin-top:12px;">
       <table class="matches-table">
