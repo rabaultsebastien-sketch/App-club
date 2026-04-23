@@ -108,12 +108,27 @@ function matchesTeam(text) {
 
       // Scroll the page fully to load all lazy content
       console.log('📜 Chargement de la page...');
-      for (let scroll = 0; scroll < 20; scroll++) {
+      let prevHeight = 0;
+      for (let scroll = 0; scroll < 30; scroll++) {
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await sleep(1500);
+        await sleep(1200);
+        // Click any "load more" / "voir plus" buttons
+        try {
+          await page.evaluate(() => {
+            for (const btn of document.querySelectorAll('button, a, [role="button"]')) {
+              const t = btn.textContent.trim().toLowerCase();
+              if (t.includes('voir plus') || t.includes('charger') || t.includes('load more') || t.includes('afficher plus')) {
+                btn.click();
+              }
+            }
+          });
+        } catch (_) {}
+        const curHeight = await page.evaluate(() => document.body.scrollHeight);
+        if (curHeight === prevHeight && scroll > 10) break;
+        prevHeight = curHeight;
       }
       await page.evaluate(() => window.scrollTo(0, 0));
-      await sleep(1000);
+      await sleep(2000);
 
       // Debug: save HTML and screenshot
       try {
@@ -132,47 +147,84 @@ function matchesTeam(text) {
         console.log(`   | ${line.slice(0, 120)}`);
       }
 
-      // Collect ALL match links
+      // Collect ALL match links with robust journée detection
       const allLinks = await page.evaluate((base) => {
         const results = [];
         const seen = new Set();
-        document.querySelectorAll('a[href*="/competition/match/"]').forEach(a => {
+        document.querySelectorAll('a[href*="/competition/match/"], a[href*="/match/"]').forEach(a => {
           const href = a.getAttribute('href') || '';
           if (seen.has(href)) return;
+          if (!/\/match\//.test(href)) return;
           seen.add(href);
           const full = href.startsWith('http') ? href : base + href;
-          // Walk up parents until we find text with "Journée" or "NATIONAL" (up to 8 levels)
-          let text = '';
+
+          let journee = 0;
+          let isNational = false;
+          let isCup = false;
+          let contextText = '';
+
+          // Walk up parents (up to 12 levels), checking element AND siblings at each level
           let el = a;
-          for (let lvl = 0; lvl < 8; lvl++) {
+          for (let lvl = 0; lvl < 12; lvl++) {
             el = el.parentElement;
             if (!el) break;
-            const t = el.textContent.trim();
-            if (/journée\s+\d+/i.test(t)) { text = t; break; }
-          }
-          if (!text) {
-            // Fallback: also check previous siblings of parent elements
-            el = a;
-            for (let lvl = 0; lvl < 6; lvl++) {
-              el = el.parentElement;
-              if (!el) break;
-              const prev = el.previousElementSibling;
-              if (prev) {
-                const pt = prev.textContent.trim();
-                if (/journée\s+\d+/i.test(pt) || /NATIONAL/i.test(pt)) {
-                  text = pt + ' ' + el.textContent.trim();
-                  break;
-                }
-              }
+
+            // Check this element's DIRECT text (not descendants) for section headers
+            const directText = Array.from(el.childNodes)
+              .filter(n => n.nodeType === 3)
+              .map(n => n.textContent.trim())
+              .join(' ');
+            if (!journee) {
+              const jm = directText.match(/journ[ée]e\s+(\d+)/i);
+              if (jm) journee = parseInt(jm[1]);
             }
+
+            // Check ALL previous siblings (up to 5) at each parent level
+            let sib = el.previousElementSibling;
+            let sibCount = 0;
+            while (sib && sibCount < 5) {
+              const st = (sib.textContent || '').trim();
+              if (!journee) {
+                const jm = st.match(/journ[ée]e\s+(\d+)/i);
+                if (jm) journee = parseInt(jm[1]);
+              }
+              if (/\bNATIONAL\b/i.test(st)) isNational = true;
+              if (/\bCOUPE\b/i.test(st)) isCup = true;
+              sib = sib.previousElementSibling;
+              sibCount++;
+            }
+
+            // Also check next sibling (section header might come after)
+            const next = el.nextElementSibling;
+            if (next && !journee) {
+              const nt = (next.textContent || '').trim();
+              const jm = nt.match(/journ[ée]e\s+(\d+)/i);
+              if (jm) journee = parseInt(jm[1]);
+            }
+
+            // Check the full element text (includes descendants)
+            const fullText = (el.textContent || '').trim();
+            if (!journee) {
+              const jm = fullText.match(/journ[ée]e\s+(\d+)/i);
+              if (jm) journee = parseInt(jm[1]);
+            }
+            if (/\bNATIONAL\b/i.test(fullText)) isNational = true;
+            if (/\bCOUPE\b/i.test(fullText)) isCup = true;
+
+            // Stop once we have what we need
+            if (journee > 0) break;
           }
-          const jm = text.match(/journée\s+(\d+)/i);
-          const isNational = /\bNATIONAL\b/i.test(text);
+
+          // Build context text for debug
+          const container = a.closest('[class*="match"], [class*="card"], [class*="result"]') || a.parentElement;
+          contextText = container ? container.textContent.trim().slice(0, 200) : '';
+
           results.push({
             url: full,
-            journee: jm ? parseInt(jm[1]) : 0,
+            journee,
             isNational,
-            text: text.slice(0, 150)
+            isCup,
+            text: contextText.slice(0, 150)
           });
         });
         return results;
@@ -184,10 +236,32 @@ function matchesTeam(text) {
         console.log(`   J${l.journee || '?'} [${tag}] → ${l.url.split('/').pop().slice(0, 55)}`);
       }
 
-      // Filter: only National championship matches in our journée list
-      let toScrape = allLinks.filter(l => l.isNational && JOURNEES.includes(l.journee));
-      console.log(`📋 ${toScrape.length} matchs National pour journées ${JOURNEES.join(', ')}`);
+      // Filter: any match with a valid journée (this is the team's National saison page)
+      // No isNational requirement — the saison page is already team-specific
+      let toScrape = allLinks.filter(l => JOURNEES.includes(l.journee) && !l.isCup);
+      // Dedup: keep only 1 link per journée (first = championship, later = cup)
+      const seenJ = new Set();
+      toScrape = toScrape.filter(l => {
+        if (seenJ.has(l.journee)) {
+          console.log(`   🔁 J${l.journee} doublon ignoré: ${l.url.split('/').pop().slice(0, 50)}`);
+          return false;
+        }
+        seenJ.add(l.journee);
+        return true;
+      });
+      // Check for missing journées — scrape unassigned links as fallback
+      const coveredJ = new Set(toScrape.map(l => l.journee));
+      const missingJ = JOURNEES.filter(j => !coveredJ.has(j));
+      if (missingJ.length > 0) {
+        const unassigned = allLinks.filter(l => l.journee === 0 && !l.isCup);
+        console.log(`   ⚠️ ${missingJ.length} journées manquantes: ${missingJ.join(', ')}`);
+        if (unassigned.length > 0) {
+          console.log(`   🔍 ${unassigned.length} liens sans journée — on les scrape aussi`);
+          toScrape.push(...unassigned);
+        }
+      }
       toScrape.sort((a, b) => (a.journee || 99) - (b.journee || 99));
+      console.log(`📋 ${toScrape.length} matchs pour journées ${JOURNEES.join(', ')} (dont ${missingJ.length} à identifier)`);
 
       console.log(`\n📋 Total: ${toScrape.length} matchs à scraper`);
 
@@ -209,6 +283,20 @@ function matchesTeam(text) {
             // Skip cup/friendly matches: no round AND page doesn't mention NATIONAL
             if (!detail.round && !detail.pageIsNational) {
               console.log(`   ⏭️ Match non-National sans journée — on passe`);
+              continue;
+            }
+            // Skip known cup opponents (not in National championship)
+            const CUP_OPPONENTS = ['leves', 'vineuil', 'chartres', 'montargis', 'blois', 'bourges 18',
+              'dreux', 'romorantin', 'chambray', 'joue les tours', 'saint pryve', 'tours fc',
+              'vierzon', 'saran', 'la chapelle', 'olivet'];
+            const opLower = normName(detail.opponent);
+            if (CUP_OPPONENTS.some(c => opLower.includes(c))) {
+              console.log(`   ⏭️ Adversaire coupe: "${detail.opponent}" — on passe`);
+              continue;
+            }
+            // Skip if page mentions "Coupe" but not "National"
+            if (detail.pageIsCup && !detail.pageIsNational) {
+              console.log(`   ⏭️ Page mentionne "Coupe" — on passe`);
               continue;
             }
             const roundMatch = detail.round.match(/(\d+)/);
@@ -396,7 +484,12 @@ function matchesTeam(text) {
 
 async function scrapeMatchDetail(page, matchUrl, isFirst) {
   await page.goto(matchUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-  await sleep(3000);
+  // Wait for Angular rendering
+  await sleep(5000);
+  // Wait for player tables to appear
+  try {
+    await page.waitForSelector('table tr td', { timeout: 5000 });
+  } catch (_) {}
 
   if (isFirst) {
     try {
@@ -542,6 +635,48 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     }
   }
 
+  // Strategy 5: retry after additional wait if still no score
+  if (!scoreHome) {
+    await sleep(3000);
+    const retryRaw = await page.evaluate(() => {
+      let domScore = '';
+      for (const sel of ['[class*="score"]', '[class*="Score"]', '[class*="result"]', '[class*="Result"]']) {
+        for (const el of document.querySelectorAll(sel)) {
+          const t = el.textContent.trim();
+          if (/^\d{1,2}\s*[-–]\s*\d{1,2}$/.test(t)) { domScore = t; break; }
+        }
+        if (domScore) break;
+      }
+      if (!domScore) {
+        const lines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(l => l);
+        for (const line of lines) {
+          if (/^\d{1,2}\s*[-–]\s*\d{1,2}$/.test(line)) { domScore = line; break; }
+        }
+        // Also check for separate digit lines (FFF layout)
+        if (!domScore) {
+          for (let i = 0; i < lines.length - 1; i++) {
+            if (/^\d{1,2}$/.test(lines[i]) && /^\d{1,2}$/.test(lines[i + 1])) {
+              const before = lines[i - 1] || '';
+              const after = lines[i + 2] || '';
+              if (before.length >= 3 && after.length >= 3 && !/^\d+$/.test(before)) {
+                domScore = `${lines[i]} - ${lines[i + 1]}`;
+                break;
+              }
+            }
+          }
+        }
+      }
+      return domScore;
+    });
+    if (retryRaw) {
+      const m = retryRaw.match(/(\d{1,2})\s*[-–]\s*(\d{1,2})/);
+      if (m) {
+        scoreHome = m[1]; scoreAway = m[2];
+        console.log(`   🔄 Score trouvé au retry: ${scoreHome}-${scoreAway}`);
+      }
+    }
+  }
+
   // ─── Find date ───
   let matchDate = '';
   const monthMap = {
@@ -644,11 +779,40 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     }
   }
 
+  // Retry if too few players (Angular may still be rendering)
+  if (allPlayers.length < 20) {
+    console.log(`   ⏳ Peu de joueurs (${allPlayers.length}), attente supplémentaire...`);
+    await sleep(4000);
+    const retryRows = await page.evaluate(() => {
+      const rows = [];
+      document.querySelectorAll('table tr').forEach(tr => {
+        const cells = Array.from(tr.querySelectorAll('td'));
+        if (cells.length >= 2) rows.push(cells.map(c => c.textContent.trim()));
+      });
+      return rows;
+    });
+    for (const row of retryRows) {
+      for (let ci = 0; ci < row.length - 1; ci++) {
+        const num = row[ci].replace(/[^\d]/g, '');
+        const name = row[ci + 1];
+        if (!/^\d{1,2}$/.test(num)) continue;
+        if (!name || name.length < 3 || name.length > 50) continue;
+        if (/\d/.test(name) || /^-/.test(name)) continue;
+        const lower = name.toLowerCase();
+        if (KNOWN_TEAMS.some(t => lower.includes(t))) continue;
+        if (TEAM_SUFFIX.test(name)) continue;
+        if (allPlayers.some(p => p.name === name)) continue;
+        allPlayers.push({ number: num, name });
+      }
+    }
+    if (allPlayers.length >= 20) console.log(`   ✅ Retry: ${allPlayers.length} joueurs trouvés`);
+  }
+
   if (isFirst) console.log(`   🔎 ${allPlayers.length} joueurs trouvés dans les tables`);
 
   // ─── Split into two teams ───
   // The FFF page lists home team first, then away team.
-  // Heuristic: detect team boundary when jersey #1 appears again (second GK)
+  // Heuristic 1: detect team boundary when jersey #1 appears again (second GK)
   let splitIdx = -1;
   for (let i = 1; i < allPlayers.length; i++) {
     if (allPlayers[i].number === '1' && i >= 10) {
@@ -656,7 +820,18 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
       break;
     }
   }
-  // Fallback: look for number sequence reset (e.g., numbers go high then back to 1-5)
+  // Heuristic 2: look for duplicate jersey numbers (same number appearing = new team)
+  if (splitIdx < 0 && allPlayers.length >= 20) {
+    const numbersSeen = new Set();
+    for (let i = 0; i < allPlayers.length; i++) {
+      if (numbersSeen.has(allPlayers[i].number) && i >= 10) {
+        splitIdx = i;
+        break;
+      }
+      numbersSeen.add(allPlayers[i].number);
+    }
+  }
+  // Heuristic 3: number sequence reset (numbers go high then back to 1-5)
   if (splitIdx < 0 && allPlayers.length >= 20) {
     for (let i = 12; i < allPlayers.length; i++) {
       const num = parseInt(allPlayers[i].number);
@@ -732,7 +907,11 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
   //   </app-moment-fort>
 
   // Wait for events to render (no tab click needed — they're on the default view)
-  await sleep(2000);
+  await sleep(3000);
+  // Try to wait for Angular event components
+  try {
+    await page.waitForSelector('app-moment-fort', { timeout: 5000 });
+  } catch (_) {}
 
   if (isFirst) {
     try {
@@ -898,8 +1077,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   const title = (homeTeam && awayTeam) ? `${homeTeam} - ${awayTeam}` : '';
 
-  // Detect if match page itself mentions "NATIONAL" (helps filter cups)
+  // Detect if match page itself mentions "NATIONAL" or "COUPE" (helps filter cups)
   const pageIsNational = raw.lines.some(l => /\bNATIONAL\b/i.test(l));
+  const pageIsCup = raw.lines.some(l => /\bCOUPE\b/i.test(l));
 
   return {
     matchId: urlSlug,
@@ -911,6 +1091,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     scoreHome,
     scoreAway,
     pageIsNational,
+    pageIsCup,
     venue: isHome ? 'Domicile' : 'Extérieur',
     opponent,
     players,

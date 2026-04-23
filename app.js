@@ -1776,6 +1776,7 @@ function openFlashscorePreview(matches) {
         const NAME_ALIASES = {
           'MAMADOU DIABY': 'SYLLA',
           'MAMADOU SYLLA': 'SYLLA',
+          'MAMADOU SYLLA DIABY': 'SYLLA',
         };
         let aliasedName = NAME_ALIASES[fp.name.toUpperCase()] || null;
         if (!aliasedName) {
