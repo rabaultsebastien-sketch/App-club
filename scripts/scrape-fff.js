@@ -195,13 +195,19 @@ function matchesTeam(text) {
         try {
           const detail = await scrapeMatchDetail(page, url, i === 0);
           if (detail && detail.players.length > 0) {
-            const roundMatch = detail.round.match(/(\d+)/);
-            const detectedJ = roundMatch ? parseInt(roundMatch[1]) : 0;
-            if (detectedJ === 0) {
-              console.log(`   ⏭️ Pas de journée détectée — match de coupe, on passe`);
+            // Use saison page journée as fallback when match page didn't detect round
+            if (!detail.round && journee > 0) {
+              detail.round = `Journée ${journee}`;
+              console.log(`   📌 Journée ${journee} (depuis page saison)`);
+            }
+            // Skip cup/friendly matches: no round AND page doesn't mention NATIONAL
+            if (!detail.round && !detail.pageIsNational) {
+              console.log(`   ⏭️ Match non-National sans journée — on passe`);
               continue;
             }
-            if (!JOURNEES.includes(detectedJ)) {
+            const roundMatch = detail.round.match(/(\d+)/);
+            const detectedJ = roundMatch ? parseInt(roundMatch[1]) : 0;
+            if (detectedJ > 0 && !JOURNEES.includes(detectedJ)) {
               console.log(`   ⏭️ Journée ${detectedJ} — exclue, on passe`);
               continue;
             }
@@ -888,6 +894,9 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
 
   const title = (homeTeam && awayTeam) ? `${homeTeam} - ${awayTeam}` : '';
 
+  // Detect if match page itself mentions "NATIONAL" (helps filter cups)
+  const pageIsNational = raw.lines.some(l => /\bNATIONAL\b/i.test(l));
+
   return {
     matchId: urlSlug,
     date: matchDate,
@@ -897,6 +906,7 @@ async function scrapeMatchDetail(page, matchUrl, isFirst) {
     away: awayTeam,
     scoreHome,
     scoreAway,
+    pageIsNational,
     venue: isHome ? 'Domicile' : 'Extérieur',
     opponent,
     players,
