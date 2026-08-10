@@ -305,6 +305,41 @@ table.matches-table td.result-loss { color: #ef4444; font-weight: 600; }
 .proj-item .name { font-weight: 500; font-size: 13px; }
 .proj-item .meta { font-size: 11px; color: var(--text-dim); }
 
+/* ========= GABON: QUALITE / OBSERVATIONS ========= */
+.badge.proj { background: rgba(139, 92, 246, 0.18); color: #c4b5fd; }
+
+.quality-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.quality-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+}
+.quality-label { font-size: 13px; color: var(--text-dim); }
+.star-rating { display: flex; gap: 2px; font-size: 18px; line-height: 1; }
+.star-rating .star { color: var(--border); }
+.star-rating .star.filled { color: var(--warning); }
+.star-rating.interactive .star { cursor: pointer; }
+.star-rating.interactive .star:hover { color: var(--warning); opacity: 0.7; }
+
+.obs-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.obs-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.obs-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
 /* ========= DATA PANEL ========= */
 .hint { color: var(--text-dim); font-size: 13px; }
 .data-actions { display: flex; gap: 10px; flex-wrap: wrap; }
