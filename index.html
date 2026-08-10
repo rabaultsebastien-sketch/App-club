@@ -22,6 +22,7 @@
       <button class="tab active" data-tab="squad">Effectif actuel</button>
       <button class="tab" data-tab="scouting">Recrutement</button>
       <button class="tab" data-tab="projection">Projection N+1</button>
+      <button class="tab" data-tab="gabon">Gabon</button>
       <button class="tab" data-tab="data">Données</button>
     </nav>
   </header>
@@ -122,6 +123,39 @@
       </div>
     </section>
 
+    <!-- ============ GABON ============ -->
+    <section id="gabon" class="panel">
+      <div class="panel-header">
+        <h2>Sélection Gabon</h2>
+        <button class="btn primary" id="add-gabon-btn">+ Ajouter un joueur</button>
+      </div>
+
+      <div class="filters">
+        <input type="text" id="gabon-search" placeholder="Rechercher un joueur..." />
+        <select id="gabon-filter-pos">
+          <option value="">Tous les postes</option>
+          <option>Gardien</option>
+          <option>Défenseur central</option>
+          <option>Latéral</option>
+          <option>Milieu défensif</option>
+          <option>Milieu central</option>
+          <option>Milieu offensif</option>
+          <option>Ailier</option>
+          <option>Attaquant</option>
+        </select>
+        <select id="gabon-filter-proj">
+          <option value="">Toutes projections</option>
+          <option>P1</option>
+          <option>P2</option>
+          <option>P3</option>
+          <option>P4</option>
+          <option>P5</option>
+        </select>
+      </div>
+
+      <div id="gabon-list" class="card-grid"></div>
+    </section>
+
     <!-- ============ DONNEES ============ -->
     <section id="data" class="panel">
       <div class="panel-header">
@@ -145,6 +179,6 @@
   <!-- ============ MODALES ============ -->
   <div id="modal-root"></div>
 
-  <script src="app.js?v=20260423c"></script>
+  <script src="app.js?v=20260810a"></script>
 </body>
 </html>

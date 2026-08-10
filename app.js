@@ -10,6 +10,13 @@ const POSITIONS = [
   'Ailier', 'Attaquant'
 ];
 const SCOUT_STATUSES = ['À observer', 'Intéressant', 'Priorité', 'Écarté'];
+const GABON_QUALITIES = [
+  { key: 'athletic', label: 'Potentiel athlétique' },
+  { key: 'gameIntelligence', label: 'Intelligence de jeu' },
+  { key: 'mindset', label: 'État d\'esprit' },
+  { key: 'technique', label: 'Exécution technique' }
+];
+const GABON_PROJECTIONS = ['P1', 'P2', 'P3', 'P4', 'P5'];
 
 /* ---------- State ---------- */
 let state = loadState();
@@ -17,9 +24,13 @@ let state = loadState();
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (!parsed.gabonPlayers) parsed.gabonPlayers = [];
+      return parsed;
+    }
   } catch (e) { console.error('Load error', e); }
-  return { squad: [], scouts: [], projection: { kept: [], targets: [], out: [] } };
+  return { squad: [], scouts: [], projection: { kept: [], targets: [], out: [] }, gabonPlayers: [] };
 }
 
 function saveState() {
@@ -59,6 +70,24 @@ function positionOptions(selected) {
   return POSITIONS.map(p =>
     `<option value="${p}"${p === selected ? ' selected' : ''}>${p}</option>`
   ).join('');
+}
+
+function ageFromBirthDate(dateStr) {
+  if (!dateStr) return '';
+  const b = new Date(dateStr);
+  if (isNaN(b)) return '';
+  const today = new Date();
+  let age = today.getFullYear() - b.getFullYear();
+  const m = today.getMonth() - b.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < b.getDate())) age--;
+  return age;
+}
+
+function starRating(value, interactive, key) {
+  value = Number(value) || 0;
+  return `<div class="star-rating${interactive ? ' interactive' : ''}" data-key="${key || ''}">
+    ${[1, 2, 3, 4, 5].map(i => `<span class="star${i <= value ? ' filled' : ''}" data-star="${i}">★</span>`).join('')}
+  </div>`;
 }
 
 /* ---------- Tabs ---------- */
@@ -421,6 +450,290 @@ function openScoutModal(player) {
 }
 
 /* =========================================================
+   GABON
+   ========================================================= */
+const gabonListEl = document.getElementById('gabon-list');
+const gabonSearchEl = document.getElementById('gabon-search');
+const gabonFilterPosEl = document.getElementById('gabon-filter-pos');
+const gabonFilterProjEl = document.getElementById('gabon-filter-proj');
+
+function renderGabon() {
+  const q = gabonSearchEl.value.toLowerCase().trim();
+  const pos = gabonFilterPosEl.value;
+  const proj = gabonFilterProjEl.value;
+  const filtered = state.gabonPlayers.filter(p => {
+    const text = `${p.firstName} ${p.lastName} ${p.club || ''}`.toLowerCase();
+    if (q && !text.includes(q)) return false;
+    if (pos && p.position !== pos) return false;
+    if (proj && p.projection !== proj) return false;
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    gabonListEl.innerHTML = `<div class="empty">Aucun joueur. Cliquez sur "+ Ajouter un joueur".</div>`;
+    return;
+  }
+
+  gabonListEl.innerHTML = filtered.map(p => {
+    const age = ageFromBirthDate(p.birthDate);
+    return `
+      <div class="card">
+        <div class="card-top">
+          <div>
+            <div class="card-name">${escapeHtml(p.firstName)} ${escapeHtml(p.lastName)}</div>
+            <div class="card-sub">
+              ${age !== '' ? age + ' ans · ' : ''}${escapeHtml(p.position || '')}
+              ${p.club ? ' · ' + escapeHtml(p.club) : ''}
+            </div>
+          </div>
+          ${p.projection ? `<span class="badge proj">${escapeHtml(p.projection)}</span>` : ''}
+        </div>
+        ${p.profile ? `<div class="card-sub" style="white-space:pre-wrap;">${escapeHtml(p.profile)}</div>` : ''}
+        <div class="card-actions">
+          <button class="btn small primary" data-act="view" data-id="${p.id}">Fiche</button>
+          <button class="btn small" data-act="edit" data-id="${p.id}">Modifier</button>
+          <button class="btn small ghost" data-act="del" data-id="${p.id}">Supprimer</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+gabonListEl.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const act = btn.dataset.act;
+  if (act === 'view') openGabonPlayerDetails(id);
+  else if (act === 'edit') openGabonPlayerModal(state.gabonPlayers.find(p => p.id === id));
+  else if (act === 'del') {
+    if (confirm('Supprimer ce joueur ?')) {
+      state.gabonPlayers = state.gabonPlayers.filter(p => p.id !== id);
+      saveState(); renderGabon();
+    }
+  }
+});
+
+[gabonSearchEl, gabonFilterPosEl, gabonFilterProjEl].forEach(el =>
+  el.addEventListener('input', renderGabon)
+);
+document.getElementById('add-gabon-btn').addEventListener('click', () => openGabonPlayerModal());
+
+/* ---------- Gabon: création / modification fiche ---------- */
+function openGabonPlayerModal(player) {
+  const isEdit = !!player;
+  const p = player || { firstName: '', lastName: '', position: '', birthDate: '', club: '' };
+  openModal(`
+    <h3>${isEdit ? 'Modifier' : 'Ajouter'} un joueur — Gabon</h3>
+    <form id="gabon-player-form">
+      <div class="form-row">
+        <label>Prénom<input name="firstName" value="${escapeAttr(p.firstName)}" required /></label>
+        <label>Nom<input name="lastName" value="${escapeAttr(p.lastName)}" required /></label>
+      </div>
+      <div class="form-row three">
+        <label>Poste<select name="position"><option value="">—</option>${positionOptions(p.position)}</select></label>
+        <label>Date de naissance<input type="date" name="birthDate" value="${escapeAttr(p.birthDate)}" /></label>
+        <label>Club<input name="club" value="${escapeAttr(p.club)}" /></label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>Annuler</button>
+        <button type="submit" class="btn primary">${isEdit ? 'Enregistrer' : 'Ajouter'}</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('gabon-player-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    if (isEdit) Object.assign(player, data);
+    else state.gabonPlayers.push({
+      id: uid(), ...data,
+      profile: '', qualities: {}, projection: '', observations: []
+    });
+    saveState(); closeModal(); renderGabon();
+  });
+}
+
+/* ---------- Gabon: fiche joueur (profil, qualité, projection, observations) ---------- */
+function openGabonPlayerDetails(playerId) {
+  const p = state.gabonPlayers.find(x => x.id === playerId);
+  if (!p) return;
+  p.qualities = p.qualities || {};
+  p.observations = p.observations || [];
+  const age = ageFromBirthDate(p.birthDate);
+
+  const qualitiesHtml = GABON_QUALITIES.map(q => `
+    <div class="quality-row">
+      <span class="quality-label">${q.label}</span>
+      ${starRating(p.qualities[q.key], false)}
+    </div>
+  `).join('');
+
+  const obsRows = p.observations.slice()
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+    .map(o => `
+      <div class="obs-item">
+        <div class="obs-head">
+          <div><strong>${escapeHtml(o.date || '')}</strong> — ${escapeHtml(o.observer || '')}</div>
+          <div class="obs-actions">
+            <button class="btn small" data-edit-obs="${o.id}">Modifier</button>
+            <button class="btn small ghost" data-del-obs="${o.id}">Supprimer</button>
+          </div>
+        </div>
+        ${o.context ? `<div class="card-sub">${escapeHtml(o.context)}</div>` : ''}
+        ${o.notes ? `<div style="white-space:pre-wrap;">${escapeHtml(o.notes)}</div>` : ''}
+      </div>
+    `).join('');
+
+  openModal(`
+    <h3>${escapeHtml(p.firstName)} ${escapeHtml(p.lastName)}</h3>
+    <div class="card-sub">
+      ${age !== '' ? age + ' ans · ' : ''}${escapeHtml(p.position || '')}${p.club ? ' · ' + escapeHtml(p.club) : ''}
+      ${p.projection ? ` · <span class="badge proj">${escapeHtml(p.projection)}</span>` : ''}
+    </div>
+
+    <div class="matches-section">
+      <h4>Profil du joueur</h4>
+      <div style="white-space:pre-wrap;">${p.profile ? escapeHtml(p.profile) : '<span class="hint">Aucun profil renseigné.</span>'}</div>
+    </div>
+
+    <div class="matches-section">
+      <h4>Qualité</h4>
+      ${qualitiesHtml}
+    </div>
+
+    <div class="modal-actions" style="justify-content:flex-start; border-top:none; padding-top:0;">
+      <button type="button" class="btn small" id="edit-eval-btn">Modifier profil / qualité / projection</button>
+    </div>
+
+    <div class="matches-section">
+      <div class="panel-header" style="margin-bottom:8px;">
+        <h4 style="margin:0;">Observations</h4>
+        <button class="btn small primary" id="add-obs-btn">+ Observation</button>
+      </div>
+      ${obsRows || '<div class="empty">Aucune observation enregistrée.</div>'}
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Fermer</button>
+    </div>
+  `);
+
+  document.getElementById('edit-eval-btn').addEventListener('click', () => openGabonEvalModal(playerId));
+  document.getElementById('add-obs-btn').addEventListener('click', () => openGabonObservationModal(playerId));
+  document.querySelectorAll('[data-edit-obs]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const obs = p.observations.find(o => o.id === btn.dataset.editObs);
+      openGabonObservationModal(playerId, obs);
+    });
+  });
+  document.querySelectorAll('[data-del-obs]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!confirm('Supprimer cette observation ?')) return;
+      p.observations = p.observations.filter(o => o.id !== btn.dataset.delObs);
+      saveState(); closeModal(); openGabonPlayerDetails(playerId);
+    });
+  });
+}
+
+/* ---------- Gabon: profil / qualité / projection ---------- */
+function openGabonEvalModal(playerId) {
+  const p = state.gabonPlayers.find(x => x.id === playerId);
+  if (!p) return;
+  p.qualities = p.qualities || {};
+  openModal(`
+    <h3>Évaluation — ${escapeHtml(p.firstName)} ${escapeHtml(p.lastName)}</h3>
+    <form id="gabon-eval-form">
+      <div class="form-row full">
+        <label>Profil du joueur
+          <textarea name="profile" placeholder="Description synthétique, qualité forte...">${escapeHtml(p.profile || '')}</textarea>
+        </label>
+      </div>
+      <div class="quality-grid">
+        ${GABON_QUALITIES.map(q => `
+          <div class="quality-row">
+            <span class="quality-label">${q.label}</span>
+            ${starRating(p.qualities[q.key], true, q.key)}
+            <input type="hidden" name="q_${q.key}" value="${Number(p.qualities[q.key]) || 0}" />
+          </div>
+        `).join('')}
+      </div>
+      <div class="form-row">
+        <label>Projection potentiel
+          <select name="projection">
+            <option value="">—</option>
+            ${GABON_PROJECTIONS.map(pr => `<option${pr === p.projection ? ' selected' : ''}>${pr}</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>Annuler</button>
+        <button type="submit" class="btn primary">Enregistrer</button>
+      </div>
+    </form>
+  `);
+
+  document.querySelectorAll('#gabon-eval-form .star-rating').forEach(group => {
+    const key = group.dataset.key;
+    const hidden = document.querySelector(`#gabon-eval-form input[name="q_${key}"]`);
+    group.querySelectorAll('.star').forEach(star => {
+      star.addEventListener('click', () => {
+        const val = Number(star.dataset.star);
+        hidden.value = String(val);
+        group.querySelectorAll('.star').forEach(s => {
+          s.classList.toggle('filled', Number(s.dataset.star) <= val);
+        });
+      });
+    });
+  });
+
+  document.getElementById('gabon-eval-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    p.profile = data.profile;
+    p.projection = data.projection;
+    p.qualities = {};
+    GABON_QUALITIES.forEach(q => { p.qualities[q.key] = Number(data['q_' + q.key]) || 0; });
+    saveState(); closeModal(); renderGabon(); openGabonPlayerDetails(playerId);
+  });
+}
+
+/* ---------- Gabon: observations ---------- */
+function openGabonObservationModal(playerId, obs) {
+  const player = state.gabonPlayers.find(p => p.id === playerId);
+  if (!player) return;
+  const isEdit = !!obs;
+  const today = new Date().toISOString().slice(0, 10);
+  const o = obs || { date: today, observer: '', context: '', notes: '' };
+  openModal(`
+    <h3>${isEdit ? 'Modifier' : 'Ajouter'} une observation</h3>
+    <form id="gabon-obs-form">
+      <div class="form-row">
+        <label>Date<input type="date" name="date" value="${escapeAttr(o.date)}" required /></label>
+        <label>Observateur<input name="observer" value="${escapeAttr(o.observer)}" required /></label>
+      </div>
+      <div class="form-row full">
+        <label>Contexte<input name="context" placeholder="Ex: Match amical vs..." value="${escapeAttr(o.context)}" /></label>
+      </div>
+      <div class="form-row full">
+        <label>Remarques<textarea name="notes">${escapeHtml(o.notes || '')}</textarea></label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>Annuler</button>
+        <button type="submit" class="btn primary">${isEdit ? 'Enregistrer' : 'Ajouter'}</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('gabon-obs-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(e.target));
+    player.observations = player.observations || [];
+    if (isEdit) Object.assign(obs, data);
+    else player.observations.push({ id: uid(), ...data });
+    saveState(); closeModal(); openGabonPlayerDetails(playerId);
+  });
+}
+
+/* =========================================================
    PROJECTION N+1
    ========================================================= */
 function renderProjection() {
@@ -594,6 +907,7 @@ document.getElementById('import-file').addEventListener('change', async e => {
     const data = JSON.parse(text);
     if (!data.squad || !data.scouts) throw new Error('Format invalide');
     if (!data.projection) data.projection = { kept: [], targets: [], out: [] };
+    if (!data.gabonPlayers) data.gabonPlayers = [];
     if (!confirm('Remplacer les données actuelles par le contenu du fichier ?')) return;
     state = data;
     saveState(); renderAll();
@@ -606,7 +920,7 @@ document.getElementById('import-file').addEventListener('change', async e => {
 
 document.getElementById('reset-btn').addEventListener('click', () => {
   if (!confirm('Tout effacer ? Cette action est irréversible.')) return;
-  state = { squad: [], scouts: [], projection: { kept: [], targets: [], out: [] } };
+  state = { squad: [], scouts: [], projection: { kept: [], targets: [], out: [] }, gabonPlayers: [] };
   saveState(); renderAll();
 });
 
@@ -1872,5 +2186,6 @@ function renderAll() {
   renderSquad();
   renderScouts();
   renderProjection();
+  renderGabon();
 }
 renderAll();
